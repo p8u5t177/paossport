@@ -22,7 +22,7 @@ npm run dev
 
 Open the web app at `http://localhost:3848`. The API runs on `http://localhost:3847` and is proxied by Vite.
 
-The admin studio is at `/admin`. In development, if `ADMIN_SECRET` is not set, the fallback is `dev-secret-change-me`. Always set a strong secret in production.
+The admin studio is at `/admin`. Set `ADMIN_SECRET` before starting the app; without it, the public journal still works but admin login remains disabled.
 
 ## Production
 

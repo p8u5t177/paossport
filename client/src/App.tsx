@@ -98,28 +98,57 @@ function Carousel({ images, linkedSlug }: { images: Image[]; linkedSlug?: string
   useEffect(() => {
     if (!embla) return;
     const update = () => setSelected(embla.selectedScrollSnap());
+    update();
     embla.on("select", update);
+    embla.on("reInit", update);
     return () => {
       embla.off("select", update);
+      embla.off("reInit", update);
     };
   }, [embla]);
 
-  const content = (
+  return (
     <div className="carousel" ref={emblaRef}>
       <div className="carousel-track">
         {images.map((image, index) => (
           <div className="carousel-slide" key={image.id}>
-            <img
-              src={image.url}
-              alt={image.alt || `Travel photograph ${index + 1} of ${images.length}`}
-              loading={index === 0 ? "eager" : "lazy"}
-            />
+            {linkedSlug ? (
+              <Link to={`/p/${linkedSlug}`} aria-label="Open journey">
+                <img
+                  src={image.url}
+                  alt={image.alt || `Travel photograph ${index + 1} of ${images.length}`}
+                  loading={index === 0 ? "eager" : "lazy"}
+                />
+              </Link>
+            ) : (
+              <img
+                src={image.url}
+                alt={image.alt || `Travel photograph ${index + 1} of ${images.length}`}
+                loading={index === 0 ? "eager" : "lazy"}
+              />
+            )}
           </div>
         ))}
       </div>
       {images.length > 1 && (
         <>
           <span className="image-count">{selected + 1} / {images.length}</span>
+          <button
+            className="carousel-arrow carousel-arrow-prev"
+            type="button"
+            onClick={() => embla?.scrollPrev()}
+            aria-label="Previous photograph"
+          >
+            <Icon name="arrow" size={22} />
+          </button>
+          <button
+            className="carousel-arrow carousel-arrow-next"
+            type="button"
+            onClick={() => embla?.scrollNext()}
+            aria-label="Next photograph"
+          >
+            <Icon name="arrow" size={22} />
+          </button>
           <div className="carousel-dots" aria-label="Carousel position">
             {images.map((image, index) => (
               <button
@@ -137,7 +166,6 @@ function Carousel({ images, linkedSlug }: { images: Image[]; linkedSlug?: string
       )}
     </div>
   );
-  return linkedSlug ? <Link to={`/p/${linkedSlug}`}>{content}</Link> : content;
 }
 
 function PostCard({ post, profile }: { post: Post; profile: Profile }) {

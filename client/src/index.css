@@ -58,8 +58,14 @@ h1, h2 { font-family: var(--serif); font-weight: 500; letter-spacing: -.035em; }
 .carousel { overflow: hidden; position: relative; background: var(--paper-deep); }
 .carousel-track { display: flex; }
 .carousel-slide { flex: 0 0 100%; min-width: 0; aspect-ratio: 4 / 5; }
+.carousel-slide > a { display: block; width: 100%; height: 100%; }
 .carousel-slide img { width: 100%; height: 100%; object-fit: cover; }
-.carousel-dots { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); display: flex; gap: 5px; padding: 5px 7px; border-radius: 999px; background: rgba(36,55,47,.55); }
+.carousel-arrow { display: none; position: absolute; z-index: 2; top: 50%; width: 42px; height: 42px; margin-top: -21px; padding: 0; border: 1px solid rgba(255,255,255,.35); border-radius: 50%; background: rgba(23,43,61,.72); color: white; place-items: center; cursor: pointer; backdrop-filter: blur(8px); transition: background .18s ease, transform .18s ease; }
+.carousel-arrow:hover { background: rgba(23,43,61,.9); transform: scale(1.04); }
+.carousel-arrow-prev { left: 14px; }
+.carousel-arrow-next { right: 14px; }
+.carousel-arrow-next .icon { transform: rotate(180deg); }
+.carousel-dots { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); display: flex; gap: 5px; padding: 5px 7px; border-radius: 999px; background: rgba(23,43,61,.55); }
 .carousel-dots button { width: 5px; height: 5px; padding: 0; border: 0; border-radius: 50%; background: rgba(255,255,255,.5); }
 .carousel-dots button.active { background: white; width: 13px; border-radius: 10px; }
 .image-count { position: absolute; top: 12px; right: 12px; padding: 5px 8px; border-radius: 999px; background: rgba(36,55,47,.65); color: white; font-size: .65rem; }
@@ -161,6 +167,10 @@ textarea { resize: vertical; line-height: 1.5; }
   .admin-actions { grid-column: auto; border: 0; padding: 0; }
   .post-editor { grid-template-columns: minmax(320px, 1.1fr) minmax(300px, .9fr); }
   .metadata-panel { padding: 12px 0; }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .carousel-arrow { display: grid; }
 }
 
 @media (min-width: 960px) {

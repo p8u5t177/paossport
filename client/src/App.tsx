@@ -330,7 +330,7 @@ function Login() {
     <main className="admin-login-page">
       <section className="login-card">
         <Link to="/" className="back-link"><Icon name="arrow" size={18} /> Back to journal</Link>
-        <div className="login-mark">N</div>
+        <div className="login-mark">P</div>
         <p className="eyebrow">Private access</p>
         <h1>Owner studio</h1>
         <p>Publish and manage your travel stories.</p>
@@ -351,11 +351,11 @@ function AdminLayout() {
   return (
     <div className="admin-shell">
       <aside className="admin-sidebar">
-        <Link to="/admin" className="wordmark"><span>N</span> Not Instagram</Link>
+        <Link to="/admin" className="wordmark"><span>P</span> paossport</Link>
         <nav><Link to="/admin">Posts</Link><Link to="/admin/new">New journey</Link><Link to="/admin/profile">Profile</Link></nav>
         <button onClick={async () => { await api("/api/auth/logout", { method: "POST" }); navigate("/"); }}>Sign out</button>
       </aside>
-      <div className="admin-mobile-nav"><Link to="/admin" className="wordmark"><span>N</span> Studio</Link><Link to="/admin/new" className="circle-button"><Icon name="plus" /></Link></div>
+      <div className="admin-mobile-nav"><Link to="/admin" className="wordmark"><span>P</span> paossport</Link><Link to="/admin/new" className="circle-button"><Icon name="plus" /></Link></div>
       <Outlet />
     </div>
   );

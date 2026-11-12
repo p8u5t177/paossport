@@ -13,6 +13,7 @@ import {
   createSession,
   destroySession,
   requireAdmin,
+  SESSION_COOKIE,
   sessionValid,
   setSessionCookie,
 } from "./auth.js";
@@ -162,7 +163,7 @@ app.post("/api/auth/login", loginLimiter, (req, res) => {
 });
 
 app.post("/api/auth/logout", (req, res) => {
-  const token = req.cookies.notinstagram_session as string | undefined;
+  const token = req.cookies[SESSION_COOKIE] as string | undefined;
   if (token) destroySession(db, token);
   clearSessionCookie(res);
   res.json({ ok: true });

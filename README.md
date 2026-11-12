@@ -1,4 +1,4 @@
-# Not Instagram
+# paossport
 
 A quiet, mobile-first travel photo journal. Visitors browse photographs, captions, dates, and map locations without accounts, likes, subscriptions, or Instagram prompts. The owner publishes through a private admin studio.
 

@@ -2,7 +2,7 @@ import type { Request, Response, NextFunction } from "express";
 import { randomBytes } from "node:crypto";
 import type Database from "better-sqlite3";
 
-const COOKIE = "notinstagram_session";
+export const SESSION_COOKIE = "paossport_session";
 const SESSION_DAYS = 14;
 
 export function createSession(db: Database.Database): string {
@@ -14,7 +14,7 @@ export function createSession(db: Database.Database): string {
 
 export function setSessionCookie(res: Response, token: string) {
   const maxAge = SESSION_DAYS * 864e5;
-  res.cookie(COOKIE, token, {
+  res.cookie(SESSION_COOKIE, token, {
     httpOnly: true,
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production",
@@ -24,7 +24,7 @@ export function setSessionCookie(res: Response, token: string) {
 }
 
 export function clearSessionCookie(res: Response) {
-  res.clearCookie(COOKIE, { path: "/" });
+  res.clearCookie(SESSION_COOKIE, { path: "/" });
 }
 
 export function destroySession(db: Database.Database, token: string) {
@@ -46,7 +46,7 @@ function validSession(db: Database.Database, token: string | undefined): boolean
 
 export function requireAdmin(db: Database.Database) {
   return (req: Request, res: Response, next: NextFunction) => {
-    const token = req.cookies[COOKIE] as string | undefined;
+    const token = req.cookies[SESSION_COOKIE] as string | undefined;
     if (!validSession(db, token)) {
       res.status(401).json({ error: "Unauthorized" });
       return;
@@ -56,5 +56,5 @@ export function requireAdmin(db: Database.Database) {
 }
 
 export function sessionValid(db: Database.Database, req: Request): boolean {
-  return validSession(db, req.cookies[COOKIE] as string | undefined);
+  return validSession(db, req.cookies[SESSION_COOKIE] as string | undefined);
 }

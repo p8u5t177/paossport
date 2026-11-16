@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import useEmblaCarousel from "embla-carousel-react";
+import exifr from "exifr";
 import {
   Link,
   Navigate,
@@ -11,21 +12,106 @@ import {
   useParams,
 } from "react-router-dom";
 
-type Image = { id: string; url: string; width?: number; height?: number; alt?: string };
+type Image = {
+  id: string;
+  url: string;
+  width?: number;
+  height?: number;
+  alt?: string;
+  focusX?: number;
+  focusY?: number;
+  fit?: "cover" | "contain";
+  hasLocationMetadata?: boolean;
+  hasDateMetadata?: boolean;
+};
+
+const FRAME_ASPECT = 4 / 5;
+
+function clamp01(value: number) {
+  return Math.min(1, Math.max(0, value));
+}
+
+function imageObjectPosition(image: Pick<Image, "focusX" | "focusY">) {
+  const x = (image.focusX ?? 0.5) * 100;
+  const y = (image.focusY ?? 0.5) * 100;
+  return `${x}% ${y}%`;
+}
+
+function isFullPhotoFit(image: Pick<Image, "fit">) {
+  return (image.fit ?? "cover") === "contain";
+}
+
+function CarouselPhoto({
+  image,
+  alt,
+  loading = "lazy",
+  focus,
+}: {
+  image: Image;
+  alt: string;
+  loading?: "eager" | "lazy";
+  focus?: FocusPoint;
+}) {
+  if (isFullPhotoFit(image)) {
+    return (
+      <img
+        className="carousel-photo-full"
+        src={image.url}
+        alt={alt}
+        loading={loading}
+        draggable={false}
+        decoding="async"
+      />
+    );
+  }
+  const positioned = focus
+    ? { focusX: focus.x, focusY: focus.y }
+    : { focusX: image.focusX, focusY: image.focusY };
+  return (
+    <img
+      src={image.url}
+      alt={alt}
+      loading={loading}
+      draggable={false}
+      decoding="async"
+      className="carousel-photo-cover"
+      style={{ objectPosition: imageObjectPosition(positioned) }}
+    />
+  );
+}
+
+function framingPanAxes(width?: number, height?: number) {
+  if (!width || !height) return { x: true, y: true };
+  const imageAspect = width / height;
+  if (imageAspect > FRAME_ASPECT + 0.02) return { x: true, y: false };
+  if (imageAspect < FRAME_ASPECT - 0.02) return { x: false, y: true };
+  return { x: false, y: false };
+}
+
+type PhotoMetadataFlags = { hasLocation: boolean; hasDate: boolean };
+
+type FileExif = PhotoMetadataFlags & { lat?: number; lng?: number; takenAt?: string };
 type Post = {
   id: string;
   slug: string;
   caption: string;
   takenAt: string;
   publishedAt: string;
+  isDraft?: boolean;
   location?: { name?: string; lat?: number; lng?: number };
   images: Image[];
 };
+
+type SiteMode = { preview: boolean; postBase: string; postsListUrl: string };
+const liveSite: SiteMode = { preview: false, postBase: "/p", postsListUrl: "/api/posts" };
+const previewSite: SiteMode = { preview: true, postBase: "/preview/p", postsListUrl: "/api/preview/posts" };
 type Profile = {
   displayName: string;
   username: string;
+  tagline: string;
   bio: string;
   avatarUrl?: string;
+  currentLocation?: { name?: string; lat?: number; lng?: number };
   links: { label: string; href: string }[];
 };
 
@@ -42,6 +128,149 @@ const formatDate = (value: string) =>
   new Intl.DateTimeFormat("en", { month: "short", day: "numeric", year: "numeric" }).format(
     new Date(value),
   );
+
+async function readFileExif(file: File): Promise<FileExif> {
+  try {
+    const exif = await exifr.parse(file, { pick: ["DateTimeOriginal", "latitude", "longitude"] });
+    if (!exif) return { hasLocation: false, hasDate: false };
+    const lat = typeof exif.latitude === "number" ? exif.latitude : undefined;
+    const lng = typeof exif.longitude === "number" ? exif.longitude : undefined;
+    const takenAt = exif.DateTimeOriginal ? new Date(exif.DateTimeOriginal).toISOString() : undefined;
+    return {
+      hasLocation: lat != null && lng != null,
+      hasDate: Boolean(takenAt),
+      lat,
+      lng,
+      takenAt,
+    };
+  } catch {
+    return { hasLocation: false, hasDate: false };
+  }
+}
+
+async function resolvePlaceName(lat: number, lng: number) {
+  const resolved = await api<{ name: string | null }>(`/api/geocode/reverse?lat=${lat}&lng=${lng}`);
+  return resolved.name;
+}
+
+function detectCurrentLocation(): Promise<{ lat: number; lng: number; name: string | null }> {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) {
+      reject(new Error("Geolocation is not available in this browser."));
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const lat = pos.coords.latitude;
+        const lng = pos.coords.longitude;
+        let name: string | null = null;
+        try {
+          name = (await resolvePlaceName(lat, lng)) ?? null;
+        } catch {
+          /* coordinates still usable */
+        }
+        resolve({ lat, lng, name });
+      },
+      () => reject(new Error("Could not access your location.")),
+      { enableHighAccuracy: true, timeout: 15000 },
+    );
+  });
+}
+
+function PhotoMetadataOverlay({ flags }: { flags: PhotoMetadataFlags }) {
+  if (!flags.hasLocation && !flags.hasDate) return null;
+  return (
+    <div className="photo-metadata-overlay" aria-label="Embedded photo metadata available">
+      {flags.hasLocation && (
+        <span>
+          <Icon name="pin" size={14} /> Location
+        </span>
+      )}
+      {flags.hasDate && <span>Date</span>}
+    </div>
+  );
+}
+
+function editorImageFlags(
+  image: Image,
+  index: number,
+  legacyLocationOnFirst: boolean,
+): PhotoMetadataFlags {
+  return {
+    hasLocation: Boolean(image.hasLocationMetadata) || (legacyLocationOnFirst && index === 0),
+    hasDate: Boolean(image.hasDateMetadata),
+  };
+}
+
+function isPaoOfflineBrand(name: string) {
+  return /^pao\.offline$/i.test(name.trim());
+}
+
+function parseDomainDisplayName(name: string) {
+  const trimmed = name.trim();
+  const dot = trimmed.indexOf(".");
+  if (dot <= 0) return null;
+  const host = trimmed.slice(0, dot);
+  const suffix = trimmed.slice(dot);
+  if (!/^[a-z0-9-]+$/i.test(host) || suffix.length < 2) return null;
+  const lead = host.charAt(0).toUpperCase() + host.slice(1).toLowerCase();
+  return { lead, suffix: suffix.toLowerCase(), label: `${lead}${suffix.toLowerCase()}` };
+}
+
+function displayNameLead(name: string) {
+  const trimmed = name.trim();
+  if (!trimmed) return trimmed;
+  const parsed = parseDomainDisplayName(trimmed);
+  if (parsed) return parsed.lead;
+  return trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
+}
+
+function avatarInitial(displayName: string) {
+  if (isPaoOfflineBrand(displayName)) return "P";
+  return displayNameLead(displayName).slice(0, 1);
+}
+
+function ProfileDisplayName({ displayName, hero = false }: { displayName: string; hero?: boolean }) {
+  if (isPaoOfflineBrand(displayName)) {
+    return <BrandName casing="title" />;
+  }
+  const parsed = parseDomainDisplayName(displayName);
+  if (parsed) {
+    if (hero) {
+      return (
+        <span className="profile-display-name profile-display-name-hero" aria-label={parsed.label}>
+          {parsed.lead}
+          {parsed.suffix}
+        </span>
+      );
+    }
+    return (
+      <>
+        {parsed.lead}
+        {parsed.suffix}
+      </>
+    );
+  }
+  if (hero) {
+    const label = displayNameLead(displayName);
+    return (
+      <span className="profile-display-name profile-display-name-hero" aria-label={label}>
+        {label}
+      </span>
+    );
+  }
+  return <>{displayNameLead(displayName)}</>;
+}
+
+function BrandName({ casing = "lower", className }: { casing?: "lower" | "title"; className?: string }) {
+  const label = casing === "title" ? "Pao.offline" : "pao.offline";
+  const classes = ["brand-name", className].filter(Boolean).join(" ");
+  return (
+    <span className={classes} aria-label="pao.offline">
+      {label}
+    </span>
+  );
+}
 
 function Icon({ name, size = 20 }: { name: "pin" | "grid" | "arrow" | "share" | "plus" | "x"; size?: number }) {
   const paths = {
@@ -85,13 +314,291 @@ function Avatar({ profile, large = false }: { profile: Profile; large?: boolean 
       {profile.avatarUrl ? (
         <img src={profile.avatarUrl} alt={`${profile.displayName}'s portrait`} />
       ) : (
-        <span>{profile.displayName.slice(0, 1)}</span>
+        <span>{avatarInitial(profile.displayName)}</span>
       )}
     </div>
   );
 }
 
-function Carousel({ images, linkedSlug }: { images: Image[]; linkedSlug?: string }) {
+type FocusPoint = { x: number; y: number };
+
+function FramingFitToggle({
+  fit,
+  disabled = false,
+  overlay = false,
+  onChange,
+  stopPointerPropagation = false,
+}: {
+  fit: "cover" | "contain";
+  disabled?: boolean;
+  overlay?: boolean;
+  onChange: (fit: "cover" | "contain") => void;
+  stopPointerPropagation?: boolean;
+}) {
+  const stopPointerBubble = (event: React.PointerEvent) => {
+    event.stopPropagation();
+  };
+  const pointerProps = stopPointerPropagation
+    ? {
+        onPointerDown: stopPointerBubble,
+        onPointerUp: stopPointerBubble,
+        onPointerCancel: stopPointerBubble,
+      }
+    : {};
+  return (
+    <div
+      className={`framing-fit-toggle${overlay ? " framing-fit-toggle-overlay" : ""}`}
+      role="group"
+      aria-label="Framing mode"
+      {...pointerProps}
+    >
+      <button
+        type="button"
+        className="framing-fit-option"
+        disabled={disabled}
+        aria-pressed={fit === "contain"}
+        onClick={(event) => {
+          if (stopPointerPropagation) event.stopPropagation();
+          if (fit !== "contain") onChange("contain");
+        }}
+        {...pointerProps}
+      >
+        Full Photo
+      </button>
+      <button
+        type="button"
+        className="framing-fit-option"
+        disabled={disabled}
+        aria-pressed={fit === "cover"}
+        onClick={(event) => {
+          if (stopPointerPropagation) event.stopPropagation();
+          if (fit !== "cover") onChange("cover");
+        }}
+        {...pointerProps}
+      >
+        Fill Frame
+      </button>
+    </div>
+  );
+}
+
+function EditorImageCarousel({
+  images,
+  legacyLocationOnFirst = false,
+  onFocusSave,
+  onFitChange,
+  framingBusy = false,
+}: {
+  images: Image[];
+  legacyLocationOnFirst?: boolean;
+  onFocusSave?: (imageId: string, focusX: number, focusY: number) => Promise<void>;
+  onFitChange?: (imageId: string, fit: "cover" | "contain") => Promise<void>;
+  framingBusy?: boolean;
+}) {
+  const [emblaRef, embla] = useEmblaCarousel({ loop: images.length > 1, watchDrag: false });
+  const [selected, setSelected] = useState(0);
+  const [focusById, setFocusById] = useState<Record<string, FocusPoint>>({});
+  const [fitById, setFitById] = useState<Record<string, "cover" | "contain">>({});
+  const [dragging, setDragging] = useState(false);
+  const dragRef = useRef<
+    | {
+        id: string;
+        startX: number;
+        startY: number;
+        focusX: number;
+        focusY: number;
+        width: number;
+        height: number;
+        axes: { x: boolean; y: boolean };
+      }
+    | null
+  >(null);
+
+  useEffect(() => {
+    if (dragging) return;
+    setFocusById(
+      Object.fromEntries(
+        images.map((image) => [image.id, { x: image.focusX ?? 0.5, y: image.focusY ?? 0.5 }]),
+      ),
+    );
+    setFitById(Object.fromEntries(images.map((image) => [image.id, image.fit ?? "cover"])));
+  }, [images, dragging]);
+
+  const resolveFit = (image: Image) => fitById[image.id] ?? image.fit ?? "cover";
+
+  const setImageFit = (image: Image, next: "cover" | "contain") => {
+    setFitById((current) => ({ ...current, [image.id]: next }));
+  };
+
+  const isFramingControl = (target: EventTarget | null) =>
+    target instanceof Element && Boolean(target.closest(".framing-fit-toggle, .framing-tool-control, button, a"));
+
+  useEffect(() => {
+    if (!embla) return;
+    const update = () => setSelected(embla.selectedScrollSnap());
+    update();
+    embla.on("select", update);
+    embla.on("reInit", update);
+    return () => {
+      embla.off("select", update);
+      embla.off("reInit", update);
+    };
+  }, [embla]);
+
+  const finishDrag = (imageId: string) => {
+    if (!dragRef.current) return;
+    const focus = focusById[imageId];
+    dragRef.current = null;
+    setDragging(false);
+    if (focus && onFocusSave) void onFocusSave(imageId, focus.x, focus.y);
+  };
+
+  const active = images[selected];
+  const activeFit = active ? resolveFit(active) : "cover";
+  const activeAxes = active ? framingPanAxes(active.width, active.height) : { x: false, y: false };
+  const canReframe = Boolean(active && activeFit === "cover" && (activeAxes.x || activeAxes.y));
+
+  return (
+    <>
+      <div className="carousel editor-carousel" ref={emblaRef}>
+        <div className="carousel-track">
+          {images.map((image, index) => {
+            const focus = focusById[image.id] ?? { x: image.focusX ?? 0.5, y: image.focusY ?? 0.5 };
+            const fit = resolveFit(image);
+            const framedImage = { ...image, fit };
+            const isActive = index === selected;
+            const axes = framingPanAxes(image.width, image.height);
+            const interactive = Boolean(onFocusSave && isActive && fit === "cover" && (axes.x || axes.y));
+            return (
+              <div
+                className={`carousel-slide photo-frame framing-frame${fit === "contain" ? " carousel-slide-contain framing-frame-contain" : ""}${interactive ? " framing-frame-active" : ""}${dragging && isActive ? " framing-frame-dragging" : ""}`}
+                key={image.id}
+                onPointerDown={
+                  interactive
+                    ? (event) => {
+                        if (isFramingControl(event.target)) return;
+                        event.currentTarget.setPointerCapture(event.pointerId);
+                        dragRef.current = {
+                          id: image.id,
+                          startX: event.clientX,
+                          startY: event.clientY,
+                          focusX: focus.x,
+                          focusY: focus.y,
+                          width: event.currentTarget.clientWidth,
+                          height: event.currentTarget.clientHeight,
+                          axes,
+                        };
+                        setDragging(true);
+                      }
+                    : undefined
+                }
+                onPointerMove={
+                  interactive
+                    ? (event) => {
+                        const drag = dragRef.current;
+                        if (!drag || drag.id !== image.id) return;
+                        const dx = event.clientX - drag.startX;
+                        const dy = event.clientY - drag.startY;
+                        const nextX = drag.axes.x ? clamp01(drag.focusX + dx / drag.width) : drag.focusX;
+                        const nextY = drag.axes.y ? clamp01(drag.focusY + dy / drag.height) : drag.focusY;
+                        setFocusById((current) => ({
+                          ...current,
+                          [image.id]: { x: nextX, y: nextY },
+                        }));
+                      }
+                    : undefined
+                }
+                onPointerUp={
+                  interactive
+                    ? (event) => {
+                        if (isFramingControl(event.target)) return;
+                        finishDrag(image.id);
+                      }
+                    : undefined
+                }
+                onPointerCancel={
+                  interactive
+                    ? (event) => {
+                        if (isFramingControl(event.target)) return;
+                        finishDrag(image.id);
+                      }
+                    : undefined
+                }
+              >
+                <CarouselPhoto
+                  image={framedImage}
+                  alt={image.alt || `Travel photograph ${index + 1} of ${images.length}`}
+                  loading={index === 0 ? "eager" : "lazy"}
+                  focus={focus}
+                />
+                <PhotoMetadataOverlay flags={editorImageFlags(image, index, legacyLocationOnFirst)} />
+                {isActive && onFitChange && (
+                  <FramingFitToggle
+                    fit={fit}
+                    overlay
+                    disabled={framingBusy}
+                    stopPointerPropagation
+                    onChange={(next) => {
+                      setImageFit(image, next);
+                      void onFitChange(image.id, next);
+                    }}
+                  />
+                )}
+              </div>
+            );
+          })}
+        </div>
+        {images.length > 1 && (
+          <>
+            <span className="image-count">{selected + 1} / {images.length}</span>
+            <button
+              className="carousel-arrow carousel-arrow-prev"
+              type="button"
+              onClick={() => embla?.scrollPrev()}
+              aria-label="Previous photograph"
+            >
+              <Icon name="arrow" size={22} />
+            </button>
+            <button
+              className="carousel-arrow carousel-arrow-next"
+              type="button"
+              onClick={() => embla?.scrollNext()}
+              aria-label="Next photograph"
+            >
+              <Icon name="arrow" size={22} />
+            </button>
+          </>
+        )}
+      </div>
+      {onFocusSave && active && (
+        <div className="editor-image-tools">
+          <span className="editor-image-tools-label">Frame photo {selected + 1}</span>
+          {onFitChange && (
+            <div className="editor-image-tools-actions">
+              <FramingFitToggle
+                fit={activeFit}
+                disabled={framingBusy}
+                onChange={(next) => {
+                  setImageFit(active, next);
+                  void onFitChange(active.id, next);
+                }}
+              />
+            </div>
+          )}
+          <p className="form-hint">
+            {activeFit === "contain"
+              ? `The whole image is scaled to fit inside the frame at its original proportions (never enlarged past its file size).${framingBusy ? " Saving…" : ""}`
+              : canReframe
+                ? `Drag to recenter the crop. Full photo fits the entire image in the frame at original proportions.${framingBusy ? " Saving…" : ""}`
+                : "Full photo fits the entire image in the frame at original proportions."}
+          </p>
+        </div>
+      )}
+    </>
+  );
+}
+
+function Carousel({ images, linkedSlug, postBase = "/p" }: { images: Image[]; linkedSlug?: string; postBase?: string }) {
   const [emblaRef, embla] = useEmblaCarousel({ loop: images.length > 1 });
   const [selected, setSelected] = useState(0);
 
@@ -110,25 +617,28 @@ function Carousel({ images, linkedSlug }: { images: Image[]; linkedSlug?: string
   return (
     <div className="carousel" ref={emblaRef}>
       <div className="carousel-track">
-        {images.map((image, index) => (
-          <div className="carousel-slide" key={image.id}>
-            {linkedSlug ? (
-              <Link to={`/p/${linkedSlug}`} aria-label="Open journey">
-                <img
-                  src={image.url}
+        {images.map((image, index) => {
+          const fullPhoto = isFullPhotoFit(image);
+          return (
+            <div className={`carousel-slide${fullPhoto ? " carousel-slide-contain" : ""}`} key={image.id}>
+              {linkedSlug ? (
+                <Link to={`${postBase}/${linkedSlug}`} aria-label="Open journey">
+                  <CarouselPhoto
+                    image={image}
+                    alt={image.alt || `Travel photograph ${index + 1} of ${images.length}`}
+                    loading={index === 0 ? "eager" : "lazy"}
+                  />
+                </Link>
+              ) : (
+                <CarouselPhoto
+                  image={image}
                   alt={image.alt || `Travel photograph ${index + 1} of ${images.length}`}
                   loading={index === 0 ? "eager" : "lazy"}
                 />
-              </Link>
-            ) : (
-              <img
-                src={image.url}
-                alt={image.alt || `Travel photograph ${index + 1} of ${images.length}`}
-                loading={index === 0 ? "eager" : "lazy"}
-              />
-            )}
-          </div>
-        ))}
+              )}
+            </div>
+          );
+        })}
       </div>
       {images.length > 1 && (
         <>
@@ -168,9 +678,18 @@ function Carousel({ images, linkedSlug }: { images: Image[]; linkedSlug?: string
   );
 }
 
-function PostCard({ post, profile }: { post: Post; profile: Profile }) {
+function PreviewSiteBanner() {
   return (
-    <article className="post-card">
+    <div className="preview-site-banner" role="status">
+      <span>Preview site</span>
+      <p>Drafts and unpublished journeys appear here. The live journal is at <Link to="/">your domain</Link>.</p>
+    </div>
+  );
+}
+
+function PostCard({ post, profile, site }: { post: Post; profile: Profile; site: SiteMode }) {
+  return (
+    <article className={`post-card${post.isDraft ? " post-card-draft" : ""}`}>
       <header className="post-header">
         <Avatar profile={profile} />
         <div>
@@ -179,19 +698,20 @@ function PostCard({ post, profile }: { post: Post; profile: Profile }) {
         </div>
         <time>{formatDate(post.takenAt)}</time>
       </header>
-      <Carousel images={post.images} linkedSlug={post.slug} />
+      {post.isDraft && <p className="draft-pill">Draft — not on live site</p>}
+      <Carousel images={post.images} linkedSlug={post.slug} postBase={site.postBase} />
       <div className="post-copy">
         {post.location?.name && (
           <div className="location-line"><Icon name="pin" size={16} />{post.location.name}</div>
         )}
         <p><strong>@{profile.username}</strong> {post.caption}</p>
-        <Link className="quiet-link" to={`/p/${post.slug}`}>View journey</Link>
+        <Link className="quiet-link" to={`${site.postBase}/${post.slug}`}>View journey</Link>
       </div>
     </article>
   );
 }
 
-function Feed() {
+function JournalFeed({ site }: { site: SiteMode }) {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [posts, setPosts] = useState<Post[]>([]);
   const [error, setError] = useState("");
@@ -201,7 +721,7 @@ function Feed() {
     try {
       const [profileData, postsData] = await Promise.all([
         api<Profile>("/api/profile"),
-        api<{ posts: Post[] }>("/api/posts"),
+        api<{ posts: Post[] }>(site.postsListUrl),
       ]);
       setProfile(profileData);
       setPosts(postsData.posts);
@@ -215,38 +735,63 @@ function Feed() {
 
   // The effect hydrates this route from the public API; state updates occur after I/O.
   // oxlint-disable-next-line react/set-state-in-effect
-  useEffect(() => { void load(); }, []);
+  useEffect(() => { void load(); }, [site.postsListUrl]);
   if (loading) return <Loading />;
   if (error || !profile) return <ErrorState message={error} retry={load} />;
 
   return (
-    <main className="page-shell feed-page">
-      <section className="profile-hero">
-        <div className="profile-top">
+    <>
+      {site.preview && <PreviewSiteBanner />}
+      <header className="profile-hero">
+        <div className="profile-masthead">
           <Avatar profile={profile} large />
-          <div>
-            <p className="eyebrow">Independent travel journal</p>
-            <h1>{profile.displayName}</h1>
-            <p className="handle">@{profile.username}</p>
-          </div>
+          <h1>
+            <ProfileDisplayName displayName={profile.displayName} hero />
+          </h1>
+          {(profile.tagline || profile.currentLocation?.name) && (
+            <div className="profile-meta">
+              {profile.tagline && <p className="profile-status">{profile.tagline}</p>}
+              {profile.currentLocation?.name && (
+                <p className="current-location" aria-live="polite">
+                  <Icon name="pin" size={16} />
+                  {profile.currentLocation.name}
+                </p>
+              )}
+            </div>
+          )}
+          {profile.bio && <p className="bio">{profile.bio}</p>}
         </div>
-        <p className="bio">{profile.bio}</p>
         {profile.links.length > 0 && (
           <nav className="profile-links">
             {profile.links.map((link) => <a href={link.href} key={link.href}>{link.label}</a>)}
           </nav>
         )}
-      </section>
-      <div className="feed-rule"><span>Latest places</span><Icon name="grid" size={16} /></div>
+      </header>
+      <main className="page-shell feed-page">
+      <div className="feed-rule"><span>{site.preview ? "Preview feed" : "Latest places"}</span><Icon name="grid" size={16} /></div>
       {posts.length === 0 ? (
-        <div className="state-card"><p className="eyebrow">The road starts here</p><h2>No posts yet.</h2><p>Visit the private admin page to publish your first journey.</p></div>
+        <div className="state-card"><p className="eyebrow">The road starts here</p><h2>No posts yet.</h2><p>{site.preview ? "Save a journey from admin to see it here before publishing." : "Visit the private admin page to publish your first journey."}</p></div>
       ) : (
         <section className="feed-list">
-          {posts.map((post) => <PostCard post={post} profile={profile} key={post.id} />)}
+          {posts.map((post) => <PostCard post={post} profile={profile} site={site} key={post.id} />)}
         </section>
       )}
-    </main>
+      {site.preview && (
+        <p className="preview-footer-link">
+          <Link to="/">← Live journal</Link>
+        </p>
+      )}
+      </main>
+    </>
   );
+}
+
+function Feed() {
+  return <JournalFeed site={liveSite} />;
+}
+
+function PreviewFeed() {
+  return <JournalFeed site={previewSite} />;
 }
 
 function TravelMap({ post }: { post: Post }) {
@@ -262,24 +807,28 @@ function TravelMap({ post }: { post: Post }) {
   );
 }
 
-function PostDetail() {
+function JourneyDetail({ site }: { site: SiteMode }) {
   const { slug } = useParams();
   const [post, setPost] = useState<Post | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [error, setError] = useState("");
+  const postUrl = site.preview ? `/api/preview/posts/${slug}` : `/api/posts/${slug}`;
+  const journalHome = site.preview ? "/preview" : "/";
 
   useEffect(() => {
-    Promise.all([api<Post>(`/api/posts/${slug}`), api<Profile>("/api/profile")])
+    Promise.all([api<Post>(postUrl), api<Profile>("/api/profile")])
       .then(([p, pr]) => { setPost(p); setProfile(pr); })
       .catch((err) => setError(err.message));
-  }, [slug]);
+  }, [slug, postUrl]);
   if (error) return <ErrorState message={error} />;
   if (!post || !profile) return <Loading />;
 
   return (
     <main className="detail-page">
+      {site.preview && <PreviewSiteBanner />}
+      {post.isDraft && <p className="draft-pill detail-draft-pill">Draft — not visible on the live site until you publish</p>}
       <nav className="detail-nav">
-        <Link to="/"><Icon name="arrow" /> <span>Journal</span></Link>
+        <Link to={journalHome}><Icon name="arrow" /> <span>Journal</span></Link>
         <button onClick={() => navigator.share?.({ title: post.location?.name, url: location.href })}>
           <Icon name="share" />
         </button>
@@ -296,6 +845,14 @@ function PostDetail() {
       </div>
     </main>
   );
+}
+
+function PostDetail() {
+  return <JourneyDetail site={liveSite} />;
+}
+
+function PreviewPostDetail() {
+  return <JourneyDetail site={previewSite} />;
 }
 
 function AdminGate() {
@@ -344,18 +901,26 @@ function Login() {
   );
 }
 
-type AdminPost = { id: string; slug: string; caption: string; taken_at: string; place_name: string | null; thumbnail?: string };
+type AdminPost = {
+  id: string;
+  slug: string;
+  caption: string;
+  takenAt: string;
+  placeName: string | null;
+  isDraft: boolean;
+  thumbnail?: string;
+};
 
 function AdminLayout() {
   const navigate = useNavigate();
   return (
     <div className="admin-shell">
       <aside className="admin-sidebar">
-        <Link to="/admin" className="wordmark"><span>P</span> paossport</Link>
+        <Link to="/admin" className="wordmark"><span>P</span><BrandName /></Link>
         <nav><Link to="/admin">Posts</Link><Link to="/admin/new">New journey</Link><Link to="/admin/profile">Profile</Link></nav>
         <button onClick={async () => { await api("/api/auth/logout", { method: "POST" }); navigate("/"); }}>Sign out</button>
       </aside>
-      <div className="admin-mobile-nav"><Link to="/admin" className="wordmark"><span>P</span> paossport</Link><Link to="/admin/new" className="circle-button"><Icon name="plus" /></Link></div>
+      <div className="admin-mobile-nav"><Link to="/admin" className="wordmark"><span>P</span><BrandName /></Link><Link to="/admin/new" className="circle-button"><Icon name="plus" /></Link></div>
       <Outlet />
     </div>
   );
@@ -367,22 +932,47 @@ function AdminDashboard() {
   const load = () => api<{ posts: AdminPost[] }>("/api/admin/posts").then((d) => setPosts(d.posts)).finally(() => setLoading(false));
   useEffect(() => { void load(); }, []);
   const remove = async (post: AdminPost) => {
-    if (!confirm(`Delete “${post.place_name || post.slug}”? This also deletes its images.`)) return;
+    if (!confirm(`Delete “${post.placeName || post.slug}”? This also deletes its images.`)) return;
     await api(`/api/posts/${post.id}`, { method: "DELETE" });
+    await load();
+  };
+  const publish = async (post: AdminPost) => {
+    if (!confirm(`Publish “${post.placeName || post.slug}” to the live site?`)) return;
+    await api<Post>(`/api/posts/${post.id}/publish`, { method: "POST" });
     await load();
   };
   return (
     <main className="admin-main">
-      <header className="admin-title"><div><p className="eyebrow">Your archive</p><h1>Journeys</h1></div><Link to="/admin/new" className="primary-button"><Icon name="plus" size={18} /> New post</Link></header>
+      <header className="admin-title">
+        <div><p className="eyebrow">Your archive</p><h1>Journeys</h1></div>
+        <div className="admin-title-actions">
+          <a className="quiet-link" href="/preview" target="_blank" rel="noreferrer">Open preview site</a>
+          <Link to="/admin/new" className="primary-button"><Icon name="plus" size={18} /> New post</Link>
+        </div>
+      </header>
       {loading ? <div className="skeleton post-skeleton" /> : posts.length === 0 ? (
-        <div className="state-card"><h2>Your journal is empty.</h2><Link to="/admin/new" className="primary-button">Publish first post</Link></div>
+        <div className="state-card"><h2>Your journal is empty.</h2><Link to="/admin/new" className="primary-button">Add first journey</Link></div>
       ) : (
         <div className="admin-post-list">
           {posts.map((post) => (
-            <article key={post.id}>
+            <article key={post.id} className={post.isDraft ? "admin-post-draft" : ""}>
               <img src={post.thumbnail} alt="" />
-              <div><strong>{post.place_name || "Untitled journey"}</strong><span>{formatDate(post.taken_at)}</span><p>{post.caption}</p></div>
-              <div className="admin-actions"><Link to={`/admin/posts/${post.slug}/edit`}>Edit</Link><Link to={`/p/${post.slug}`}>View</Link><button onClick={() => remove(post)}>Delete</button></div>
+              <div>
+                <strong>{post.placeName || "Untitled journey"}</strong>
+                {post.isDraft ? <span className="status-pill status-draft">Preview only</span> : <span className="status-pill status-live">Live</span>}
+                <span>{formatDate(post.takenAt)}</span>
+                <p>{post.caption}</p>
+              </div>
+              <div className="admin-actions">
+                <Link to={`/admin/posts/${post.slug}/edit`}>Edit</Link>
+                <Link to={`/preview/p/${post.slug}`} target="_blank" rel="noreferrer">Preview</Link>
+                {post.isDraft ? (
+                  <button type="button" className="publish-action" onClick={() => publish(post)}>Publish</button>
+                ) : (
+                  <Link to={`/p/${post.slug}`}>View live</Link>
+                )}
+                <button type="button" onClick={() => remove(post)}>Delete</button>
+              </div>
             </article>
           ))}
         </div>
@@ -400,10 +990,57 @@ function NewPost() {
   const [takenAt, setTakenAt] = useState("");
   const [lat, setLat] = useState("");
   const [lng, setLng] = useState("");
+  const [locating, setLocating] = useState(false);
+  const [locError, setLocError] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [fileExif, setFileExif] = useState<FileExif[]>([]);
   const previews = useMemo(() => files.map((file) => ({ file, url: URL.createObjectURL(file) })), [files]);
   useEffect(() => () => previews.forEach((preview) => URL.revokeObjectURL(preview.url)), [previews]);
+
+  useEffect(() => {
+    if (!files.length) {
+      setFileExif([]);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const parsed = await Promise.all(files.map(readFileExif));
+      if (cancelled) return;
+      setFileExif(parsed);
+      const withGps = parsed.find((item) => item.hasLocation && item.lat != null && item.lng != null);
+      if (withGps) {
+        setLat((prev) => prev || String(withGps.lat));
+        setLng((prev) => prev || String(withGps.lng));
+        try {
+          const name = await resolvePlaceName(withGps.lat!, withGps.lng!);
+          if (!cancelled && name) setPlace((prev) => prev || name);
+        } catch {
+          /* place can be entered manually */
+        }
+      }
+      const withDate = parsed.find((item) => item.hasDate && item.takenAt);
+      if (withDate?.takenAt) {
+        setTakenAt((prev) => prev || new Date(withDate.takenAt!).toISOString().slice(0, 16));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [files]);
+
+  const useMyLocation = () => {
+    setLocating(true);
+    setLocError("");
+    void detectCurrentLocation()
+      .then(({ lat: nextLat, lng: nextLng, name }) => {
+        setLat(String(nextLat));
+        setLng(String(nextLng));
+        if (name) setPlace(name);
+      })
+      .catch((err) => setLocError(err instanceof Error ? err.message : "Could not detect location"))
+      .finally(() => setLocating(false));
+  };
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -418,8 +1055,8 @@ function NewPost() {
     if (lng) data.append("lng", lng);
     try {
       const post = await api<Post>("/api/posts", { method: "POST", body: data });
-      navigate(`/p/${post.slug}`);
-    } catch (err) { setError(err instanceof Error ? err.message : "Could not publish"); setBusy(false); }
+      navigate(`/preview/p/${post.slug}`);
+    } catch (err) { setError(err instanceof Error ? err.message : "Could not save"); setBusy(false); }
   };
   return (
     <main className="admin-main editor-page">
@@ -429,8 +1066,19 @@ function NewPost() {
           <input ref={inputRef} hidden multiple type="file" accept="image/jpeg,image/png,image/webp" onChange={(e) => setFiles(Array.from(e.target.files || []).slice(0, 10))} />
           {previews.length ? (
             <>
-              <div className="preview-main"><img src={previews[0]!.url} alt="Selected preview" /></div>
-              <div className="preview-strip">{previews.map(({ file, url }, index) => <img src={url} alt={`Selected ${index + 1}`} key={file.name + index} />)}<button type="button" onClick={() => inputRef.current?.click()}><Icon name="plus" /></button></div>
+              <div className="preview-main photo-frame">
+                <img src={previews[0]!.url} alt="Selected preview" />
+                {fileExif[0] && <PhotoMetadataOverlay flags={fileExif[0]} />}
+              </div>
+              <div className="preview-strip">
+                {previews.map(({ file, url }, index) => (
+                  <div className="photo-frame" key={file.name + index}>
+                    <img src={url} alt={`Selected ${index + 1}`} />
+                    {fileExif[index] && <PhotoMetadataOverlay flags={fileExif[index]!} />}
+                  </div>
+                ))}
+                <button type="button" onClick={() => inputRef.current?.click()}><Icon name="plus" /></button>
+              </div>
             </>
           ) : (
             <button type="button" className="drop-zone" onClick={() => inputRef.current?.click()}><Icon name="plus" size={28} /><strong>Select your photographs</strong><span>JPEG, PNG or WebP · up to 10 images</span></button>
@@ -441,9 +1089,14 @@ function NewPost() {
           <label>Date taken <span className="optional">Optional</span><input type="datetime-local" value={takenAt} onChange={(e) => setTakenAt(e.target.value)} /></label>
           <label>Story<textarea value={caption} onChange={(e) => setCaption(e.target.value)} placeholder="What made this moment worth keeping?" rows={6} /></label>
           <div className="coordinates"><label>Latitude<input inputMode="decimal" value={lat} onChange={(e) => setLat(e.target.value)} placeholder="35.0116" /></label><label>Longitude<input inputMode="decimal" value={lng} onChange={(e) => setLng(e.target.value)} placeholder="135.7681" /></label></div>
-          <p className="form-hint">Date and GPS are read from the first photo when available.</p>
+          <button className="primary-button location-detect-button" type="button" disabled={locating} onClick={useMyLocation}>
+            {locating ? "Detecting…" : "Use my location"}
+          </button>
+          <p className="form-hint">Location, date, and coordinates are filled from photo metadata when available.</p>
+          {locError && <p className="form-error">{locError}</p>}
           {error && <p className="form-error">{error}</p>}
-          <button className="primary-button" disabled={busy} type="submit">{busy ? "Publishing…" : "Publish journey"}</button>
+          <p className="form-hint">Saves as a preview draft. Publish from the Posts list or edit screen when you are ready for the live site.</p>
+          <button className="primary-button" disabled={busy} type="submit">{busy ? "Saving…" : "Save to preview"}</button>
         </section>
       </form>
     </main>
@@ -453,11 +1106,40 @@ function NewPost() {
 function ProfileEditor() {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [saved, setSaved] = useState(false);
-  useEffect(() => { api<Profile>("/api/profile").then(setProfile); }, []);
+  const [place, setPlace] = useState("");
+  const [lat, setLat] = useState("");
+  const [lng, setLng] = useState("");
+  const [locating, setLocating] = useState(false);
+  const [locError, setLocError] = useState("");
+  useEffect(() => {
+    api<Profile>("/api/profile").then((data) => {
+      setProfile(data);
+      setPlace(data.currentLocation?.name ?? "");
+      setLat(data.currentLocation?.lat != null ? String(data.currentLocation.lat) : "");
+      setLng(data.currentLocation?.lng != null ? String(data.currentLocation.lng) : "");
+    });
+  }, []);
   if (!profile) return <Loading />;
+
+  const useMyLocation = () => {
+    setLocating(true);
+    setLocError("");
+    void detectCurrentLocation()
+      .then(({ lat: nextLat, lng: nextLng, name }) => {
+        setLat(String(nextLat));
+        setLng(String(nextLng));
+        if (name) setPlace(name);
+      })
+      .catch((err) => setLocError(err instanceof Error ? err.message : "Could not detect location"))
+      .finally(() => setLocating(false));
+  };
+
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
+    data.set("currentPlaceName", place);
+    data.set("currentLat", lat);
+    data.set("currentLng", lng);
     await api("/api/profile", { method: "PATCH", body: data });
     setSaved(true);
   };
@@ -468,7 +1150,21 @@ function ProfileEditor() {
         <div className="profile-avatar-edit"><Avatar profile={profile} large /><label>Portrait<input name="avatar" type="file" accept="image/*" /></label></div>
         <label>Display name<input name="displayName" defaultValue={profile.displayName} /></label>
         <label>Handle<input name="username" defaultValue={profile.username} /></label>
+        <label>Catch phrase<input name="tagline" defaultValue={profile.tagline} /></label>
         <label>Bio<textarea name="bio" rows={5} defaultValue={profile.bio} /></label>
+        <div className="profile-location-edit">
+          <p className="eyebrow">Current location</p>
+          <label>Place<input value={place} onChange={(e) => setPlace(e.target.value)} placeholder="Lisbon, Portugal" /></label>
+          <div className="coordinates">
+            <label>Latitude<input inputMode="decimal" value={lat} onChange={(e) => setLat(e.target.value)} placeholder="38.7223" /></label>
+            <label>Longitude<input inputMode="decimal" value={lng} onChange={(e) => setLng(e.target.value)} placeholder="-9.1393" /></label>
+          </div>
+          <button className="primary-button" type="button" disabled={locating} onClick={useMyLocation}>
+            {locating ? "Detecting…" : "Use my location"}
+          </button>
+          <p className="form-hint">Shown on the journal home page above your bio.</p>
+          {locError && <p className="form-error">{locError}</p>}
+        </div>
         {saved && <p className="success">Profile saved.</p>}
         <button className="primary-button" type="submit">Save profile</button>
       </form>
@@ -480,28 +1176,82 @@ function EditPost() {
   const { slug } = useParams();
   const navigate = useNavigate();
   const [post, setPost] = useState<Post | null>(null);
+  const [place, setPlace] = useState("");
+  const [lat, setLat] = useState("");
+  const [lng, setLng] = useState("");
+  const [takenAt, setTakenAt] = useState("");
+  const [caption, setCaption] = useState("");
   const [error, setError] = useState("");
+  const [locating, setLocating] = useState(false);
+  const [locError, setLocError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [framingBusy, setFramingBusy] = useState(false);
+  const [imagesBusy, setImagesBusy] = useState(false);
+  const addImagesRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
-    api<Post>(`/api/posts/${slug}`).then(setPost).catch((err) => setError(err.message));
+    let cancelled = false;
+    api<Post>(`/api/admin/posts/${slug}`)
+      .then(async (loaded) => {
+        if (cancelled) return;
+        setPost(loaded);
+        setCaption(loaded.caption);
+        setTakenAt(new Date(loaded.takenAt).toISOString().slice(0, 16));
+        const nextLat = loaded.location?.lat;
+        const nextLng = loaded.location?.lng;
+        let nextPlace = loaded.location?.name ?? "";
+        if (nextLat != null && nextLng != null) {
+          setLat(String(nextLat));
+          setLng(String(nextLng));
+          if (!nextPlace) {
+            try {
+              const resolved = await resolvePlaceName(nextLat, nextLng);
+              if (resolved) nextPlace = resolved;
+            } catch {
+              /* manual entry still available */
+            }
+          }
+        }
+        setPlace(nextPlace);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : "Could not load post"));
+    return () => {
+      cancelled = true;
+    };
   }, [slug]);
-  if (error) return <ErrorState message={error} />;
+  if (error && !post) return <ErrorState message={error} />;
   if (!post) return <Loading />;
+
+  const legacyLocationOnFirst =
+    post.location?.lat != null &&
+    post.location?.lng != null &&
+    !post.images.some((image) => image.hasLocationMetadata);
+
+  const useMyLocation = () => {
+    setLocating(true);
+    setLocError("");
+    void detectCurrentLocation()
+      .then(({ lat: nextLat, lng: nextLng, name }) => {
+        setLat(String(nextLat));
+        setLng(String(nextLng));
+        if (name) setPlace(name);
+      })
+      .catch((err) => setLocError(err instanceof Error ? err.message : "Could not detect location"))
+      .finally(() => setLocating(false));
+  };
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setBusy(true);
-    const data = new FormData(event.currentTarget);
     try {
       await api(`/api/posts/${post.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          placeName: data.get("placeName"),
-          caption: data.get("caption"),
-          takenAt: new Date(String(data.get("takenAt"))).toISOString(),
-          lat: data.get("lat") ? Number(data.get("lat")) : null,
-          lng: data.get("lng") ? Number(data.get("lng")) : null,
+          placeName: place,
+          caption,
+          takenAt: new Date(takenAt).toISOString(),
+          lat: lat ? Number(lat) : null,
+          lng: lng ? Number(lng) : null,
         }),
       });
       navigate("/admin");
@@ -511,22 +1261,180 @@ function EditPost() {
     }
   };
 
+  const patchImageFraming = async (
+    imageId: string,
+    payload: { focusX?: number; focusY?: number; fit?: "cover" | "contain" },
+  ) => {
+    setFramingBusy(true);
+    setError("");
+    try {
+      const updated = await api<{ id: string; focusX: number; focusY: number; fit: "cover" | "contain" }>(
+        `/api/post-images/${imageId}/focus`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+      );
+      setPost((current) =>
+        current
+          ? {
+              ...current,
+              images: current.images.map((image) =>
+                image.id === updated.id
+                  ? {
+                      ...image,
+                      focusX: updated.focusX,
+                      focusY: updated.focusY,
+                      fit: updated.fit,
+                    }
+                  : image,
+              ),
+            }
+          : current,
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save framing");
+    } finally {
+      setFramingBusy(false);
+    }
+  };
+
+  const saveImageFocus = (imageId: string, focusX: number, focusY: number) =>
+    patchImageFraming(imageId, { focusX, focusY });
+
+  const saveImageFit = (imageId: string, fit: "cover" | "contain") =>
+    patchImageFraming(imageId, {
+      fit,
+      ...(fit === "contain" ? { focusX: 0.5, focusY: 0.5 } : {}),
+    });
+
+  const removeImage = async (imageId: string) => {
+    if (post.images.length <= 1) return;
+    if (!confirm("Remove this photo from the journey?")) return;
+    setImagesBusy(true);
+    setError("");
+    try {
+      const updated = await api<Post>(`/api/post-images/${imageId}`, { method: "DELETE" });
+      setPost(updated);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not remove photo");
+    } finally {
+      setImagesBusy(false);
+    }
+  };
+
+  const addImages = async (fileList: FileList | null) => {
+    if (!fileList?.length) return;
+    const remaining = 10 - post.images.length;
+    if (remaining <= 0) {
+      setError("A journey can have at most 10 photos.");
+      return;
+    }
+    const files = Array.from(fileList).slice(0, remaining);
+    const data = new FormData();
+    files.forEach((file) => data.append("images", file));
+    setImagesBusy(true);
+    setError("");
+    try {
+      const updated = await api<Post>(`/api/posts/${post.id}/images`, { method: "POST", body: data });
+      setPost(updated);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not add photos");
+    } finally {
+      setImagesBusy(false);
+      if (addImagesRef.current) addImagesRef.current.value = "";
+    }
+  };
+
+  const publish = async () => {
+    if (!confirm("Publish this journey to the live site?")) return;
+    setBusy(true);
+    try {
+      await api(`/api/posts/${post.id}/publish`, { method: "POST" });
+      const updated = await api<Post>(`/api/admin/posts/${post.slug}`);
+      setPost(updated);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not publish");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <main className="admin-main editor-page">
-      <header className="admin-title"><div><p className="eyebrow">Refine the story</p><h1>Edit journey</h1></div></header>
+      <header className="admin-title">
+        <div>
+          <p className="eyebrow">Refine the story</p>
+          <h1>Edit journey</h1>
+          {post.isDraft && <span className="status-pill status-draft">Preview only</span>}
+        </div>
+        <div className="admin-title-actions">
+          <Link className="quiet-link" to={`/preview/p/${post.slug}`} target="_blank" rel="noreferrer">Open preview</Link>
+          {post.isDraft && (
+            <button className="primary-button" type="button" disabled={busy} onClick={publish}>
+              {busy ? "Publishing…" : "Publish to live site"}
+            </button>
+          )}
+        </div>
+      </header>
       <form className="post-editor" onSubmit={submit}>
         <section className="upload-panel">
-          <Carousel images={post.images} />
-          <p className="form-hint">Image replacement and reordering can be added later; metadata is editable now.</p>
+          <input
+            ref={addImagesRef}
+            hidden
+            multiple
+            type="file"
+            accept="image/jpeg,image/png,image/webp"
+            onChange={(e) => void addImages(e.target.files)}
+          />
+          <EditorImageCarousel
+            images={post.images}
+            legacyLocationOnFirst={legacyLocationOnFirst}
+            onFocusSave={saveImageFocus}
+            onFitChange={saveImageFit}
+            framingBusy={framingBusy}
+          />
+          <div className="preview-strip editor-photo-strip">
+            {post.images.map((image, index) => (
+              <div className="photo-frame" key={image.id}>
+                <img src={image.url} alt={`Journey photo ${index + 1}`} />
+                {post.images.length > 1 && (
+                  <button
+                    type="button"
+                    className="strip-remove"
+                    disabled={imagesBusy}
+                    aria-label={`Remove photo ${index + 1}`}
+                    onClick={() => void removeImage(image.id)}
+                  >
+                    <Icon name="x" size={14} />
+                  </button>
+                )}
+              </div>
+            ))}
+            {post.images.length < 10 && (
+              <button type="button" disabled={imagesBusy} onClick={() => addImagesRef.current?.click()} aria-label="Add photos">
+                <Icon name="plus" />
+              </button>
+            )}
+          </div>
+          <p className="form-hint">
+            Add or remove photos in the strip below (up to 10). Badges show embedded GPS or date metadata. Drag the main photo to change what is centered in the frame.
+            {imagesBusy ? " Updating photos…" : ""}
+          </p>
         </section>
         <section className="metadata-panel">
-          <label>Place<input name="placeName" defaultValue={post.location?.name} /></label>
-          <label>Date taken<input name="takenAt" type="datetime-local" defaultValue={new Date(post.takenAt).toISOString().slice(0, 16)} /></label>
-          <label>Story<textarea name="caption" rows={7} defaultValue={post.caption} /></label>
+          <label>Place<input value={place} onChange={(e) => setPlace(e.target.value)} placeholder="Kyoto, Japan" /></label>
+          <label>Date taken<input type="datetime-local" value={takenAt} onChange={(e) => setTakenAt(e.target.value)} /></label>
+          <label>Story<textarea value={caption} onChange={(e) => setCaption(e.target.value)} rows={7} /></label>
           <div className="coordinates">
-            <label>Latitude<input name="lat" inputMode="decimal" defaultValue={post.location?.lat} /></label>
-            <label>Longitude<input name="lng" inputMode="decimal" defaultValue={post.location?.lng} /></label>
+            <label>Latitude<input inputMode="decimal" value={lat} onChange={(e) => setLat(e.target.value)} placeholder="35.0116" /></label>
+            <label>Longitude<input inputMode="decimal" value={lng} onChange={(e) => setLng(e.target.value)} placeholder="135.7681" /></label>
           </div>
+          <button className="primary-button location-detect-button" type="button" disabled={locating} onClick={useMyLocation}>
+            {locating ? "Detecting…" : "Use my location"}
+          </button>
+          {locError && <p className="form-error">{locError}</p>}
           {error && <p className="form-error">{error}</p>}
           <button className="primary-button" disabled={busy} type="submit">{busy ? "Saving…" : "Save changes"}</button>
         </section>
@@ -539,7 +1447,9 @@ export default function App() {
   return (
     <Routes>
       <Route path="/" element={<Feed />} />
+      <Route path="/preview" element={<PreviewFeed />} />
       <Route path="/p/:slug" element={<PostDetail />} />
+      <Route path="/preview/p/:slug" element={<PreviewPostDetail />} />
       <Route path="/admin/login" element={<Login />} />
       <Route element={<AdminGate />}>
         <Route element={<AdminLayout />}>

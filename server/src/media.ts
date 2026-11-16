@@ -43,6 +43,7 @@ export async function saveImage(file: Pick<Express.Multer.File, "buffer" | "mime
     .rotate()
     .resize({ width: 2000, height: 2000, fit: "inside", withoutEnlargement: true })
     .webp({ quality: 85 })
+    .withMetadata({ orientation: 1 })
     .toFile(dest);
   const storageKey = path.join(sub, filename);
   const publicUrl = `/media/${storageKey.replace(/\\/g, "/")}`;
@@ -55,6 +56,35 @@ export async function saveImage(file: Pick<Express.Multer.File, "buffer" | "mime
     height: meta.height,
     exif,
   };
+}
+
+export async function readImageDimensions(storageKey: string) {
+  try {
+    const full = path.join(MEDIA_ROOT, storageKey.replace(/\\/g, "/"));
+    if (!full.startsWith(MEDIA_ROOT) || !fs.existsSync(full)) return null;
+    const meta = await sharp(full).metadata();
+    if (meta.width && meta.height) return { width: meta.width, height: meta.height };
+  } catch {
+    /* fall through */
+  }
+  return null;
+}
+
+export async function reconcileImageDimensions(db: import("better-sqlite3").Database) {
+  const rows = db.prepare("SELECT id, storage_key, width, height FROM post_image").all() as Array<{
+    id: string;
+    storage_key: string;
+    width: number | null;
+    height: number | null;
+  }>;
+  const update = db.prepare("UPDATE post_image SET width = ?, height = ? WHERE id = ?");
+  for (const row of rows) {
+    const dims = await readImageDimensions(row.storage_key);
+    if (!dims) continue;
+    if (dims.width !== row.width || dims.height !== row.height) {
+      update.run(dims.width, dims.height, row.id);
+    }
+  }
 }
 
 export function deleteImageByUrl(publicUrl: string) {

@@ -15,6 +15,7 @@ export function getDb() {
       id INTEGER PRIMARY KEY CHECK (id = 1),
       display_name TEXT NOT NULL DEFAULT 'Traveler',
       username TEXT NOT NULL DEFAULT 'traveler',
+      tagline TEXT NOT NULL DEFAULT 'To Nowhere. And Everywhere',
       bio TEXT NOT NULL DEFAULT '',
       avatar_url TEXT,
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -60,6 +61,46 @@ export function getDb() {
     INSERT OR IGNORE INTO profile (id, display_name, username, bio)
     VALUES (1, 'Alex Rivera', 'alexr', 'Muted maps and loud sunsets. A travel journal without the noise.');
   `);
+
+  const profileCols = db.prepare("PRAGMA table_info(profile)").all() as { name: string }[];
+  const profileColNames = new Set(profileCols.map((col) => col.name));
+  if (!profileColNames.has("tagline")) {
+    db.exec(`ALTER TABLE profile ADD COLUMN tagline TEXT NOT NULL DEFAULT 'To Nowhere. And Everywhere'`);
+  }
+  if (!profileColNames.has("current_place_name")) {
+    db.exec(`ALTER TABLE profile ADD COLUMN current_place_name TEXT`);
+  }
+  if (!profileColNames.has("current_lat")) {
+    db.exec(`ALTER TABLE profile ADD COLUMN current_lat REAL`);
+  }
+  if (!profileColNames.has("current_lng")) {
+    db.exec(`ALTER TABLE profile ADD COLUMN current_lng REAL`);
+  }
+
+  const postCols = db.prepare("PRAGMA table_info(post)").all() as { name: string }[];
+  const postColNames = new Set(postCols.map((col) => col.name));
+  if (!postColNames.has("is_draft")) {
+    db.exec(`ALTER TABLE post ADD COLUMN is_draft INTEGER NOT NULL DEFAULT 0`);
+  }
+
+  const imageCols = db.prepare("PRAGMA table_info(post_image)").all() as { name: string }[];
+  const imageColNames = new Set(imageCols.map((col) => col.name));
+  if (!imageColNames.has("has_location_metadata")) {
+    db.exec(`ALTER TABLE post_image ADD COLUMN has_location_metadata INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!imageColNames.has("has_date_metadata")) {
+    db.exec(`ALTER TABLE post_image ADD COLUMN has_date_metadata INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!imageColNames.has("focus_x")) {
+    db.exec(`ALTER TABLE post_image ADD COLUMN focus_x REAL NOT NULL DEFAULT 0.5`);
+  }
+  if (!imageColNames.has("focus_y")) {
+    db.exec(`ALTER TABLE post_image ADD COLUMN focus_y REAL NOT NULL DEFAULT 0.5`);
+  }
+  if (!imageColNames.has("fit_mode")) {
+    db.exec(`ALTER TABLE post_image ADD COLUMN fit_mode TEXT NOT NULL DEFAULT 'cover'`);
+  }
+
   return db;
 }
 
@@ -69,6 +110,7 @@ export type PostRow = {
   caption: string;
   taken_at: string;
   published_at: string;
+  is_draft: number;
   place_name: string | null;
   lat: number | null;
   lng: number | null;

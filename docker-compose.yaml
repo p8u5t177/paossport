@@ -1,0 +1,5 @@
+# Referenced by Coolify; the app is built and run from the root Dockerfile.
+services:
+  app:
+    build:
+      context: .

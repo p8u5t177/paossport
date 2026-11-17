@@ -91,6 +91,15 @@ function framingPanAxes(width?: number, height?: number) {
 type PhotoMetadataFlags = { hasLocation: boolean; hasDate: boolean };
 
 type FileExif = PhotoMetadataFlags & { lat?: number; lng?: number; takenAt?: string };
+type PostChapter = {
+  id: string;
+  slug: string;
+  title: string;
+  trip: { id: string; slug: string; title: string };
+};
+
+type PostTrip = { id: string; slug: string; title: string };
+
 type Post = {
   id: string;
   slug: string;
@@ -98,13 +107,41 @@ type Post = {
   takenAt: string;
   publishedAt: string;
   isDraft?: boolean;
+  trip?: PostTrip;
+  chapter?: PostChapter;
   location?: { name?: string; lat?: number; lng?: number };
   images: Image[];
 };
 
-type SiteMode = { preview: boolean; postBase: string; postsListUrl: string };
-const liveSite: SiteMode = { preview: false, postBase: "/p", postsListUrl: "/api/posts" };
-const previewSite: SiteMode = { preview: true, postBase: "/preview/p", postsListUrl: "/api/preview/posts" };
+type AdminChapter = { id: string; slug: string; title: string; tripId: string };
+type AdminTrip = { id: string; slug: string; title: string; chapters: AdminChapter[] };
+type FeedChapter = { id: string; slug: string; title: string };
+type FeedTrip = { id: string; slug: string; title: string; chapters: FeedChapter[] };
+
+type SiteMode = {
+  preview: boolean;
+  postBase: string;
+  postsListUrl: string;
+  tripsListUrl: string;
+};
+const liveSite: SiteMode = {
+  preview: false,
+  postBase: "/p",
+  postsListUrl: "/api/posts",
+  tripsListUrl: "/api/trips",
+};
+const previewSite: SiteMode = {
+  preview: true,
+  postBase: "/preview/p",
+  postsListUrl: "/api/preview/posts",
+  tripsListUrl: "/api/preview/trips",
+};
+
+const ALL_CHAPTERS = "all";
+type FeedViewMode = "timeline" | "grouped";
+type TripFeedPrefs = { view: FeedViewMode; chapterId: string };
+
+const defaultTripFeedPrefs = (): TripFeedPrefs => ({ view: "timeline", chapterId: ALL_CHAPTERS });
 type Profile = {
   displayName: string;
   username: string;
@@ -128,6 +165,159 @@ const formatDate = (value: string) =>
   new Intl.DateTimeFormat("en", { month: "short", day: "numeric", year: "numeric" }).format(
     new Date(value),
   );
+
+function storyShortTitle(post: Post) {
+  if (post.location?.name) {
+    const primary = post.location.name.split(",")[0]?.trim();
+    if (primary) return primary;
+  }
+  const words = post.caption.trim().split(/\s+/).filter(Boolean).slice(0, 5).join(" ");
+  if (words) return words;
+  return new Intl.DateTimeFormat("en", { month: "short", year: "numeric" }).format(new Date(post.takenAt));
+}
+
+function storyThumbnail(post: Post) {
+  const lat = post.location?.lat;
+  const lng = post.location?.lng;
+  if (lat != null && lng != null) {
+    const mapUrl = `https://staticmap.openstreetmap.de/staticmap.php?center=${lat},${lng}&zoom=12&size=160x160&maptype=mapnik&markers=${lat},${lng},lightblue1`;
+    return { type: "map" as const, url: mapUrl, alt: post.location?.name || "Map" };
+  }
+  const cover = post.images[0];
+  if (cover?.url) {
+    return { type: "photo" as const, url: cover.url, alt: cover.alt || storyShortTitle(post) };
+  }
+  return null;
+}
+
+function postTripId(post: Post) {
+  return post.chapter?.trip.id ?? post.trip?.id;
+}
+
+function journeyGroupingLabel(post: Post) {
+  const tripTitle = post.chapter?.trip.title ?? post.trip?.title;
+  if (!tripTitle) return null;
+  if (post.chapter) return `${tripTitle} · ${post.chapter.title}`;
+  return tripTitle;
+}
+
+function postsForTrip(posts: Post[], tripId: string) {
+  return posts.filter((post) => postTripId(post) === tripId);
+}
+
+function tripCoverPost(posts: Post[], tripId: string) {
+  return postsForTrip(posts, tripId)[0];
+}
+
+function TripSelector({
+  trips,
+  posts,
+  selectedId,
+  onSelect,
+}: {
+  trips: FeedTrip[];
+  posts: Post[];
+  selectedId: string;
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <div className="story-selector-shell" aria-label="Trips">
+      <div className="story-selector" role="tablist" aria-orientation="horizontal">
+        {trips.map((trip) => {
+          const selected = trip.id === selectedId;
+          const cover = tripCoverPost(posts, trip.id);
+          const thumb = cover ? storyThumbnail(cover) : null;
+          return (
+            <button
+              key={trip.id}
+              type="button"
+              role="tab"
+              aria-selected={selected}
+              className={`story-chip${selected ? " story-chip-selected" : ""}`}
+              onClick={() => onSelect(trip.id)}
+            >
+              <span className="story-chip-ring" aria-hidden>
+                {thumb ? (
+                  <img
+                    className="story-chip-thumb"
+                    src={thumb.url}
+                    alt=""
+                    loading="lazy"
+                    decoding="async"
+                    draggable={false}
+                  />
+                ) : (
+                  <span className="story-chip-fallback">
+                    <Icon name="journey" size={22} />
+                  </span>
+                )}
+              </span>
+              <span className="story-chip-label" title={trip.title}>
+                {trip.title}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function FeedViewControls({
+  view,
+  chapterId,
+  chapters,
+  canGroup,
+  onViewChange,
+  onChapterChange,
+}: {
+  view: FeedViewMode;
+  chapterId: string;
+  chapters: FeedChapter[];
+  canGroup: boolean;
+  onViewChange: (view: FeedViewMode) => void;
+  onChapterChange: (id: string) => void;
+}) {
+  const grouped = view === "grouped";
+  return (
+    <div className="feed-view-bar" role="toolbar" aria-label="View for this trip">
+      <span className="feed-view-label">View</span>
+      <button
+        type="button"
+        className={`feed-view-pill${!grouped ? " feed-view-pill-selected" : ""}`}
+        aria-pressed={!grouped}
+        onClick={() => onViewChange("timeline")}
+      >
+        Timeline
+      </button>
+      {canGroup ? (
+        <button
+          type="button"
+          className={`feed-view-pill${grouped ? " feed-view-pill-selected" : ""}`}
+          aria-pressed={grouped}
+          onClick={() => onViewChange("grouped")}
+        >
+          Grouped by
+        </button>
+      ) : null}
+      {grouped && canGroup && chapters.length > 0 ? (
+        <select
+          className="feed-view-chapter-select"
+          aria-label="Chapter"
+          value={chapterId}
+          onChange={(e) => onChapterChange(e.target.value)}
+        >
+          <option value={ALL_CHAPTERS}>All chapters</option>
+          {chapters.map((chapter) => (
+            <option key={chapter.id} value={chapter.id}>
+              {chapter.title}
+            </option>
+          ))}
+        </select>
+      ) : null}
+    </div>
+  );
+}
 
 async function readFileExif(file: File): Promise<FileExif> {
   try {
@@ -272,9 +462,16 @@ function BrandName({ casing = "lower", className }: { casing?: "lower" | "title"
   );
 }
 
-function Icon({ name, size = 20 }: { name: "pin" | "grid" | "arrow" | "share" | "plus" | "x"; size?: number }) {
+function Icon({
+  name,
+  size = 20,
+}: {
+  name: "pin" | "grid" | "arrow" | "share" | "plus" | "x" | "journey";
+  size?: number;
+}) {
   const paths = {
     pin: <path d="M12 21s7-6.2 7-13A7 7 0 1 0 5 8c0 6.8 7 13 7 13Zm0-10a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" />,
+    journey: <path d="M3 6.5 9 4.5l6 2 6-2v13l-6 2-6-2-6 2V6.5Z M9 4.5v13M15 6.5v13" />,
     grid: <path d="M4 4h6v6H4V4Zm10 0h6v6h-6V4ZM4 14h6v6H4v-6Zm10 0h6v6h-6v-6Z" />,
     arrow: <path d="m15 18-6-6 6-6" />,
     share: <path d="M12 16V3m0 0L7 8m5-5 5 5M5 13v7h14v-7" />,
@@ -688,6 +885,7 @@ function PreviewSiteBanner() {
 }
 
 function PostCard({ post, profile, site }: { post: Post; profile: Profile; site: SiteMode }) {
+  const grouping = journeyGroupingLabel(post);
   return (
     <article className={`post-card${post.isDraft ? " post-card-draft" : ""}`}>
       <header className="post-header">
@@ -695,12 +893,14 @@ function PostCard({ post, profile, site }: { post: Post; profile: Profile; site:
         <div>
           <strong>@{profile.username}</strong>
           {post.location?.name && <span>{post.location.name}</span>}
+          {grouping && <span className="journey-grouping">{grouping}</span>}
         </div>
         <time>{formatDate(post.takenAt)}</time>
       </header>
       {post.isDraft && <p className="draft-pill">Draft — not on live site</p>}
       <Carousel images={post.images} linkedSlug={post.slug} postBase={site.postBase} />
       <div className="post-copy">
+        {grouping && <p className="journey-grouping-line">{grouping}</p>}
         {post.location?.name && (
           <div className="location-line"><Icon name="pin" size={16} />{post.location.name}</div>
         )}
@@ -714,17 +914,22 @@ function PostCard({ post, profile, site }: { post: Post; profile: Profile; site:
 function JournalFeed({ site }: { site: SiteMode }) {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [posts, setPosts] = useState<Post[]>([]);
+  const [trips, setTrips] = useState<FeedTrip[]>([]);
+  const [selectedTripId, setSelectedTripId] = useState<string | null>(null);
+  const [tripFeedPrefs, setTripFeedPrefs] = useState<Record<string, TripFeedPrefs>>({});
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
 
   const load = async () => {
     try {
-      const [profileData, postsData] = await Promise.all([
+      const [profileData, postsData, tripsData] = await Promise.all([
         api<Profile>("/api/profile"),
-        api<{ posts: Post[] }>(site.postsListUrl),
+        api<{ posts: Post[] }>(`${site.postsListUrl}?limit=50`),
+        api<{ trips: FeedTrip[] }>(site.tripsListUrl),
       ]);
       setProfile(profileData);
       setPosts(postsData.posts);
+      setTrips(tripsData.trips);
       setError("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
@@ -735,9 +940,98 @@ function JournalFeed({ site }: { site: SiteMode }) {
 
   // The effect hydrates this route from the public API; state updates occur after I/O.
   // oxlint-disable-next-line react/set-state-in-effect
-  useEffect(() => { void load(); }, [site.postsListUrl]);
+  useEffect(() => { void load(); }, [site.postsListUrl, site.tripsListUrl]);
+
+  const tripBrowse = trips.length > 0;
+
+  useEffect(() => {
+    if (!tripBrowse) {
+      setSelectedTripId(null);
+      return;
+    }
+    setSelectedTripId((current) =>
+      current && trips.some((trip) => trip.id === current) ? current : (trips[0]?.id ?? null),
+    );
+  }, [trips, tripBrowse]);
+
+  const activeTrip = useMemo(
+    () => (selectedTripId ? trips.find((trip) => trip.id === selectedTripId) : undefined),
+    [trips, selectedTripId],
+  );
+
+  const activeTripPrefs = useMemo(() => {
+    if (!selectedTripId) return defaultTripFeedPrefs();
+    return tripFeedPrefs[selectedTripId] ?? defaultTripFeedPrefs();
+  }, [selectedTripId, tripFeedPrefs]);
+
+  const feedView = activeTripPrefs.view;
+  const chapterId = activeTripPrefs.chapterId;
+
+  const tripPosts = useMemo(() => {
+    if (!selectedTripId) return [];
+    return postsForTrip(posts, selectedTripId);
+  }, [posts, selectedTripId]);
+
+  const patchTripPrefs = (tripId: string, patch: Partial<TripFeedPrefs>) => {
+    setTripFeedPrefs((prev) => ({
+      ...prev,
+      [tripId]: { ...defaultTripFeedPrefs(), ...prev[tripId], ...patch },
+    }));
+  };
+
+  const groupedChapters = useMemo(() => {
+    if (!activeTrip) return [];
+    if (chapterId === ALL_CHAPTERS) return activeTrip.chapters;
+    return activeTrip.chapters.filter((chapter) => chapter.id === chapterId);
+  }, [activeTrip, chapterId]);
+
+  const feedRule = useMemo(() => {
+    if (!tripBrowse) return site.preview ? "Preview feed" : "Latest places";
+    if (!activeTrip) return site.preview ? "Preview feed" : "Latest places";
+    if (feedView === "timeline") return activeTrip.title;
+    if (chapterId === ALL_CHAPTERS) return activeTrip.title;
+    const chapter = activeTrip.chapters.find((item) => item.id === chapterId);
+    return chapter?.title ?? activeTrip.title;
+  }, [activeTrip, chapterId, feedView, site.preview, tripBrowse]);
+
+  const feedRuleDetail = useMemo(() => {
+    if (!tripBrowse) return null;
+    if (feedView === "timeline") return "Timeline · newest first";
+    if (chapterId === ALL_CHAPTERS) return "Grouped by chapter";
+    return "One chapter";
+  }, [chapterId, feedView, tripBrowse]);
+
+  const onTripSelect = (tripId: string) => {
+    setSelectedTripId(tripId);
+  };
+
+  const onFeedViewChange = (view: FeedViewMode) => {
+    if (!selectedTripId) return;
+    patchTripPrefs(selectedTripId, {
+      view,
+      chapterId: view === "grouped" ? ALL_CHAPTERS : activeTripPrefs.chapterId,
+    });
+  };
+
+  const onChapterChange = (nextChapterId: string) => {
+    if (!selectedTripId) return;
+    patchTripPrefs(selectedTripId, { chapterId: nextChapterId });
+  };
+
+  const canGroupByChapter = Boolean(activeTrip && activeTrip.chapters.length > 0);
+
+  // oxlint-disable-next-line react/set-state-in-effect
+  useEffect(() => {
+    if (!selectedTripId || canGroupByChapter || feedView !== "grouped") return;
+    patchTripPrefs(selectedTripId, { view: "timeline" });
+  }, [canGroupByChapter, feedView, selectedTripId]);
+
   if (loading) return <Loading />;
   if (error || !profile) return <ErrorState message={error} retry={load} />;
+
+  const showTripFeed = tripBrowse && Boolean(activeTrip);
+  const timelineFeed = showTripFeed ? tripPosts : posts;
+  const showGroupedFeed = showTripFeed && canGroupByChapter && feedView === "grouped";
 
   return (
     <>
@@ -760,6 +1054,26 @@ function JournalFeed({ site }: { site: SiteMode }) {
             </div>
           )}
           {profile.bio && <p className="bio">{profile.bio}</p>}
+          {tripBrowse && selectedTripId && activeTrip ? (
+            <div className="trip-feed-controls">
+              <TripSelector
+                trips={trips}
+                posts={posts}
+                selectedId={selectedTripId}
+                onSelect={onTripSelect}
+              />
+              {canGroupByChapter ? (
+                <FeedViewControls
+                  view={feedView}
+                  chapterId={chapterId}
+                  chapters={activeTrip.chapters}
+                  canGroup={canGroupByChapter}
+                  onViewChange={onFeedViewChange}
+                  onChapterChange={onChapterChange}
+                />
+              ) : null}
+            </div>
+          ) : null}
         </div>
         {profile.links.length > 0 && (
           <nav className="profile-links">
@@ -768,12 +1082,37 @@ function JournalFeed({ site }: { site: SiteMode }) {
         )}
       </header>
       <main className="page-shell feed-page">
-      <div className="feed-rule"><span>{site.preview ? "Preview feed" : "Latest places"}</span><Icon name="grid" size={16} /></div>
+      <div className="feed-rule">
+        <span>{feedRule}</span>
+        {feedRuleDetail ? <span className="feed-rule-detail">{feedRuleDetail}</span> : <Icon name="grid" size={16} />}
+      </div>
       {posts.length === 0 ? (
         <div className="state-card"><p className="eyebrow">The road starts here</p><h2>No posts yet.</h2><p>{site.preview ? "Save a journey from admin to see it here before publishing." : "Visit the private admin page to publish your first journey."}</p></div>
+      ) : showGroupedFeed ? (
+        <div className="feed-list feed-list-grouped">
+          {groupedChapters.map((chapter) => {
+            const chapterPosts = tripPosts.filter((post) => post.chapter?.id === chapter.id);
+            if (chapterPosts.length === 0) return null;
+            return (
+              <section key={chapter.id} className="feed-chapter-block">
+                <header className="feed-chapter-heading">
+                  <h2>{chapter.title}</h2>
+                  <p>
+                    {chapterPosts.length} journey{chapterPosts.length === 1 ? "" : "s"}
+                  </p>
+                </header>
+                <div className="feed-list feed-list-nested">
+                  {chapterPosts.map((post) => (
+                    <PostCard post={post} profile={profile} site={site} key={post.id} />
+                  ))}
+                </div>
+              </section>
+            );
+          })}
+        </div>
       ) : (
         <section className="feed-list">
-          {posts.map((post) => <PostCard post={post} profile={profile} site={site} key={post.id} />)}
+          {timelineFeed.map((post) => <PostCard post={post} profile={profile} site={site} key={post.id} />)}
         </section>
       )}
       {site.preview && (
@@ -823,6 +1162,8 @@ function JourneyDetail({ site }: { site: SiteMode }) {
   if (error) return <ErrorState message={error} />;
   if (!post || !profile) return <Loading />;
 
+  const grouping = journeyGroupingLabel(post);
+
   return (
     <main className="detail-page">
       {site.preview && <PreviewSiteBanner />}
@@ -837,6 +1178,7 @@ function JourneyDetail({ site }: { site: SiteMode }) {
         <Carousel images={post.images} />
         <div className="detail-copy">
           <p className="eyebrow">{formatDate(post.takenAt)}</p>
+          {grouping && <p className="journey-grouping detail-grouping">{grouping}</p>}
           <h1>{post.location?.name || "A place worth remembering"}</h1>
           <p className="detail-caption">{post.caption}</p>
           <div className="author-line"><Avatar profile={profile} /><span>Photographed by <strong>{profile.displayName}</strong></span></div>
@@ -909,7 +1251,208 @@ type AdminPost = {
   placeName: string | null;
   isDraft: boolean;
   thumbnail?: string;
+  tripTitle?: string | null;
+  chapterTitle?: string | null;
 };
+
+function JourneyOrganizationFields({
+  tripId,
+  chapterId,
+  onTripIdChange,
+  onChapterIdChange,
+}: {
+  tripId: string;
+  chapterId: string;
+  onTripIdChange: (id: string) => void;
+  onChapterIdChange: (id: string) => void;
+}) {
+  const [trips, setTrips] = useState<AdminTrip[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [orgError, setOrgError] = useState("");
+  const [newTripTitle, setNewTripTitle] = useState("");
+  const [newChapterTitle, setNewChapterTitle] = useState("");
+  const [addingTrip, setAddingTrip] = useState(false);
+  const [addingChapter, setAddingChapter] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const reloadTrips = async () => {
+    const data = await api<{ trips: AdminTrip[] }>("/api/admin/trips");
+    setTrips(data.trips);
+  };
+
+  useEffect(() => {
+    void reloadTrips()
+      .catch((err) => setOrgError(err instanceof Error ? err.message : "Could not load trips"))
+      .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    if (loading || !chapterId || tripId) return;
+    for (const trip of trips) {
+      if (trip.chapters.some((chapter) => chapter.id === chapterId)) {
+        onTripIdChange(trip.id);
+        return;
+      }
+    }
+  }, [chapterId, loading, onTripIdChange, tripId, trips]);
+
+  const chapters = useMemo(() => {
+    if (!tripId) return [];
+    return trips.find((trip) => trip.id === tripId)?.chapters ?? [];
+  }, [tripId, trips]);
+
+  const createTrip = async () => {
+    const title = newTripTitle.trim();
+    if (!title) return;
+    setBusy(true);
+    setOrgError("");
+    try {
+      const created = await api<AdminTrip>("/api/admin/trips", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+      });
+      await reloadTrips();
+      onTripIdChange(created.id);
+      onChapterIdChange("");
+      setAddingTrip(false);
+      setNewTripTitle("");
+    } catch (err) {
+      setOrgError(err instanceof Error ? err.message : "Could not create trip");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const createChapter = async () => {
+    const title = newChapterTitle.trim();
+    if (!tripId || !title) return;
+    setBusy(true);
+    setOrgError("");
+    try {
+      const created = await api<AdminChapter>("/api/admin/chapters", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tripId, title }),
+      });
+      await reloadTrips();
+      onChapterIdChange(created.id);
+      setAddingChapter(false);
+      setNewChapterTitle("");
+    } catch (err) {
+      setOrgError(err instanceof Error ? err.message : "Could not create chapter");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="organization-fields">
+      <p className="eyebrow">Journal structure</p>
+      <p className="form-hint">
+        Optional. Trip can be saved on its own; add a chapter when you want finer grouping on the journal.
+      </p>
+      {loading ? (
+        <p className="form-hint">Loading trips…</p>
+      ) : (
+        <>
+          <label>
+            Trip
+            <select
+              value={tripId}
+              onChange={(e) => {
+                onTripIdChange(e.target.value);
+                onChapterIdChange("");
+              }}
+            >
+              <option value="">None</option>
+              {trips.map((trip) => (
+                <option key={trip.id} value={trip.id}>
+                  {trip.title}
+                </option>
+              ))}
+            </select>
+          </label>
+          {!addingTrip ? (
+            <button type="button" className="organization-text-button" onClick={() => setAddingTrip(true)}>
+              + New trip
+            </button>
+          ) : (
+            <div className="organization-inline-add">
+              <label>
+                Trip title
+                <input
+                  value={newTripTitle}
+                  onChange={(e) => setNewTripTitle(e.target.value)}
+                  placeholder="Japan 2024"
+                />
+              </label>
+              <button type="button" className="primary-button" disabled={busy} onClick={() => void createTrip()}>
+                Add
+              </button>
+              <button
+                type="button"
+                className="organization-text-button"
+                onClick={() => {
+                  setAddingTrip(false);
+                  setNewTripTitle("");
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+          <label>
+            Chapter
+            <select
+              value={chapterId}
+              disabled={!tripId}
+              onChange={(e) => onChapterIdChange(e.target.value)}
+            >
+              <option value="">{tripId ? "None" : "Choose a trip first"}</option>
+              {chapters.map((chapter) => (
+                <option key={chapter.id} value={chapter.id}>
+                  {chapter.title}
+                </option>
+              ))}
+            </select>
+          </label>
+          {tripId &&
+            (!addingChapter ? (
+              <button type="button" className="organization-text-button" onClick={() => setAddingChapter(true)}>
+                + New chapter
+              </button>
+            ) : (
+              <div className="organization-inline-add">
+                <label>
+                  Chapter title
+                  <input
+                    value={newChapterTitle}
+                    onChange={(e) => setNewChapterTitle(e.target.value)}
+                    placeholder="Before we go"
+                  />
+                </label>
+                <button type="button" className="primary-button" disabled={busy} onClick={() => void createChapter()}>
+                  Add
+                </button>
+                <button
+                  type="button"
+                  className="organization-text-button"
+                  onClick={() => {
+                    setAddingChapter(false);
+                    setNewChapterTitle("");
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            ))}
+        </>
+      )}
+      {orgError && <p className="form-error">{orgError}</p>}
+    </div>
+  );
+}
 
 function AdminLayout() {
   const navigate = useNavigate();
@@ -961,6 +1504,11 @@ function AdminDashboard() {
                 <strong>{post.placeName || "Untitled journey"}</strong>
                 {post.isDraft ? <span className="status-pill status-draft">Preview only</span> : <span className="status-pill status-live">Live</span>}
                 <span>{formatDate(post.takenAt)}</span>
+                {(post.tripTitle || post.chapterTitle) && (
+                  <span className="admin-post-grouping">
+                    {[post.tripTitle, post.chapterTitle].filter(Boolean).join(" · ")}
+                  </span>
+                )}
                 <p>{post.caption}</p>
               </div>
               <div className="admin-actions">
@@ -994,6 +1542,8 @@ function NewPost() {
   const [locError, setLocError] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [tripId, setTripId] = useState("");
+  const [chapterId, setChapterId] = useState("");
   const [fileExif, setFileExif] = useState<FileExif[]>([]);
   const previews = useMemo(() => files.map((file) => ({ file, url: URL.createObjectURL(file) })), [files]);
   useEffect(() => () => previews.forEach((preview) => URL.revokeObjectURL(preview.url)), [previews]);
@@ -1053,8 +1603,20 @@ function NewPost() {
     if (takenAt) data.append("takenAt", new Date(takenAt).toISOString());
     if (lat) data.append("lat", lat);
     if (lng) data.append("lng", lng);
+    data.append("tripId", tripId);
+    data.append("chapterId", chapterId);
     try {
       const post = await api<Post>("/api/posts", { method: "POST", body: data });
+      if (tripId && !postTripId(post)) {
+        setError("Trip didn't save. Try saving again.");
+        setBusy(false);
+        return;
+      }
+      if (chapterId && !post.chapter) {
+        setError("Chapter didn't save. Try saving again.");
+        setBusy(false);
+        return;
+      }
       navigate(`/preview/p/${post.slug}`);
     } catch (err) { setError(err instanceof Error ? err.message : "Could not save"); setBusy(false); }
   };
@@ -1085,6 +1647,12 @@ function NewPost() {
           )}
         </section>
         <section className="metadata-panel">
+          <JourneyOrganizationFields
+            tripId={tripId}
+            chapterId={chapterId}
+            onTripIdChange={setTripId}
+            onChapterIdChange={setChapterId}
+          />
           <label>Place<input value={place} onChange={(e) => setPlace(e.target.value)} placeholder="Kyoto, Japan" /></label>
           <label>Date taken <span className="optional">Optional</span><input type="datetime-local" value={takenAt} onChange={(e) => setTakenAt(e.target.value)} /></label>
           <label>Story<textarea value={caption} onChange={(e) => setCaption(e.target.value)} placeholder="What made this moment worth keeping?" rows={6} /></label>
@@ -1187,6 +1755,8 @@ function EditPost() {
   const [busy, setBusy] = useState(false);
   const [framingBusy, setFramingBusy] = useState(false);
   const [imagesBusy, setImagesBusy] = useState(false);
+  const [tripId, setTripId] = useState("");
+  const [chapterId, setChapterId] = useState("");
   const addImagesRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     let cancelled = false;
@@ -1195,6 +1765,8 @@ function EditPost() {
         if (cancelled) return;
         setPost(loaded);
         setCaption(loaded.caption);
+        setChapterId(loaded.chapter?.id ?? "");
+        setTripId(loaded.trip?.id ?? loaded.chapter?.trip.id ?? "");
         setTakenAt(new Date(loaded.takenAt).toISOString().slice(0, 16));
         const nextLat = loaded.location?.lat;
         const nextLng = loaded.location?.lng;
@@ -1242,8 +1814,9 @@ function EditPost() {
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setBusy(true);
+    setError("");
     try {
-      await api(`/api/posts/${post.id}`, {
+      const updated = await api<Post>(`/api/posts/${post.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1252,8 +1825,20 @@ function EditPost() {
           takenAt: new Date(takenAt).toISOString(),
           lat: lat ? Number(lat) : null,
           lng: lng ? Number(lng) : null,
+          tripId: tripId || null,
+          chapterId: chapterId || null,
         }),
       });
+      if (tripId && !postTripId(updated)) {
+        setError("Trip didn't save. Try saving again.");
+        setBusy(false);
+        return;
+      }
+      if (chapterId && !updated.chapter) {
+        setError("Chapter didn't save. Try saving again.");
+        setBusy(false);
+        return;
+      }
       navigate("/admin");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not save changes");
@@ -1424,6 +2009,12 @@ function EditPost() {
           </p>
         </section>
         <section className="metadata-panel">
+          <JourneyOrganizationFields
+            tripId={tripId}
+            chapterId={chapterId}
+            onTripIdChange={setTripId}
+            onChapterIdChange={setChapterId}
+          />
           <label>Place<input value={place} onChange={(e) => setPlace(e.target.value)} placeholder="Kyoto, Japan" /></label>
           <label>Date taken<input type="datetime-local" value={takenAt} onChange={(e) => setTakenAt(e.target.value)} /></label>
           <label>Story<textarea value={caption} onChange={(e) => setCaption(e.target.value)} rows={7} /></label>

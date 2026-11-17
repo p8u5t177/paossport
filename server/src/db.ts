@@ -58,6 +58,26 @@ export function getDb() {
       expires_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS trip (
+      id TEXT PRIMARY KEY,
+      slug TEXT NOT NULL UNIQUE,
+      title TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS chapter (
+      id TEXT PRIMARY KEY,
+      trip_id TEXT NOT NULL REFERENCES trip(id) ON DELETE CASCADE,
+      slug TEXT NOT NULL,
+      title TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(trip_id, slug)
+    );
+
     INSERT OR IGNORE INTO profile (id, display_name, username, bio)
     VALUES (1, 'Alex Rivera', 'alexr', 'Muted maps and loud sunsets. A travel journal without the noise.');
   `);
@@ -81,6 +101,12 @@ export function getDb() {
   const postColNames = new Set(postCols.map((col) => col.name));
   if (!postColNames.has("is_draft")) {
     db.exec(`ALTER TABLE post ADD COLUMN is_draft INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!postColNames.has("chapter_id")) {
+    db.exec(`ALTER TABLE post ADD COLUMN chapter_id TEXT REFERENCES chapter(id) ON DELETE SET NULL`);
+  }
+  if (!postColNames.has("trip_id")) {
+    db.exec(`ALTER TABLE post ADD COLUMN trip_id TEXT REFERENCES trip(id) ON DELETE SET NULL`);
   }
 
   const imageCols = db.prepare("PRAGMA table_info(post_image)").all() as { name: string }[];

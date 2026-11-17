@@ -113,3 +113,27 @@ export function uniqueSlug(db: import("better-sqlite3").Database, base: string):
   }
   return slug;
 }
+
+export function uniqueTripSlug(db: import("better-sqlite3").Database, base: string): string {
+  let slug = slugify(base === "" ? "trip" : base);
+  let n = 0;
+  while (db.prepare("SELECT 1 FROM trip WHERE slug = ?").get(slug)) {
+    n += 1;
+    slug = `${slugify(base)}-${n}`;
+  }
+  return slug;
+}
+
+export function uniqueChapterSlug(
+  db: import("better-sqlite3").Database,
+  tripId: string,
+  base: string,
+): string {
+  let slug = slugify(base === "" ? "chapter" : base);
+  let n = 0;
+  while (db.prepare("SELECT 1 FROM chapter WHERE trip_id = ? AND slug = ?").get(tripId, slug)) {
+    n += 1;
+    slug = `${slugify(base)}-${n}`;
+  }
+  return slug;
+}

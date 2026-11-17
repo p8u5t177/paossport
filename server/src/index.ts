@@ -23,7 +23,9 @@ import {
   ensureMediaDirs,
   reconcileImageDimensions,
   saveImage,
+  uniqueChapterSlug,
   uniqueSlug,
+  uniqueTripSlug,
 } from "./media.js";
 import { reverseGeocodeLabel } from "./geocode.js";
 import { mapProfileLocation, type ProfileRow } from "./profile-map.js";
@@ -53,6 +55,88 @@ app.use(express.json({ limit: "1mb" }));
 
 app.use("/media", express.static(MEDIA_ROOT, { maxAge: "7d" }));
 
+function mapChapter(chapterId: string | null | undefined) {
+  if (!chapterId) return undefined;
+  const chapter = db
+    .prepare("SELECT id, trip_id, slug, title FROM chapter WHERE id = ?")
+    .get(chapterId) as { id: string; trip_id: string; slug: string; title: string } | undefined;
+  if (!chapter) return undefined;
+  const trip = db
+    .prepare("SELECT id, slug, title FROM trip WHERE id = ?")
+    .get(chapter.trip_id) as { id: string; slug: string; title: string } | undefined;
+  if (!trip) return undefined;
+  return {
+    id: chapter.id,
+    slug: chapter.slug,
+    title: chapter.title,
+    trip: { id: trip.id, slug: trip.slug, title: trip.title },
+  };
+}
+
+function formField(body: unknown, key: string): unknown {
+  if (!body || typeof body !== "object") return undefined;
+  const value = (body as Record<string, unknown>)[key];
+  if (Array.isArray(value)) return value[0];
+  return value;
+}
+
+function resolveChapterId(raw: unknown): { ok: true; chapterId: string | null } | { ok: false } {
+  if (raw === undefined || raw === null || raw === "") {
+    return { ok: true, chapterId: null };
+  }
+  const id = String(raw).trim();
+  if (!id) return { ok: true, chapterId: null };
+  const row = db.prepare("SELECT id FROM chapter WHERE id = ?").get(id);
+  if (!row) return { ok: false };
+  return { ok: true, chapterId: id };
+}
+
+function resolveTripId(raw: unknown): { ok: true; tripId: string | null } | { ok: false } {
+  if (raw === undefined || raw === null || raw === "") {
+    return { ok: true, tripId: null };
+  }
+  const id = String(raw).trim();
+  if (!id) return { ok: true, tripId: null };
+  const row = db.prepare("SELECT id FROM trip WHERE id = ?").get(id);
+  if (!row) return { ok: false };
+  return { ok: true, tripId: id };
+}
+
+function mapTrip(tripId: string | null | undefined) {
+  if (!tripId) return undefined;
+  const trip = db
+    .prepare("SELECT id, slug, title FROM trip WHERE id = ?")
+    .get(tripId) as { id: string; slug: string; title: string } | undefined;
+  if (!trip) return undefined;
+  return { id: trip.id, slug: trip.slug, title: trip.title };
+}
+
+function resolvePostOrganization(
+  tripRaw: unknown,
+  chapterRaw: unknown,
+): { ok: true; tripId: string | null; chapterId: string | null } | { ok: false; error: string } {
+  const chapterResolved = resolveChapterId(chapterRaw);
+  if (!chapterResolved.ok) return { ok: false, error: "Chapter not found" };
+  const tripResolved = resolveTripId(tripRaw);
+  if (!tripResolved.ok) return { ok: false, error: "Trip not found" };
+
+  let chapterId = chapterResolved.chapterId;
+  let tripId = tripResolved.tripId;
+
+  if (chapterId) {
+    const chapter = db
+      .prepare("SELECT trip_id FROM chapter WHERE id = ?")
+      .get(chapterId) as { trip_id: string } | undefined;
+    if (!chapter) return { ok: false, error: "Chapter not found" };
+    if (tripId && tripId !== chapter.trip_id) {
+      return { ok: false, error: "Chapter does not belong to that trip" };
+    }
+    tripId = chapter.trip_id;
+  }
+
+  return { ok: true, tripId, chapterId };
+}
+
 function mapPost(
   post: {
     id: string;
@@ -61,6 +145,8 @@ function mapPost(
     taken_at: string;
     published_at: string;
     is_draft?: number;
+    chapter_id?: string | null;
+    trip_id?: string | null;
     place_name: string | null;
     lat: number | null;
     lng: number | null;
@@ -92,6 +178,8 @@ function mapPost(
     takenAt: post.taken_at,
     publishedAt: post.published_at,
     isDraft: Boolean(post.is_draft),
+    chapter: mapChapter(post.chapter_id),
+    trip: mapChapter(post.chapter_id)?.trip ?? mapTrip(post.trip_id),
     location:
       post.lat != null && post.lng != null
         ? { name: post.place_name ?? undefined, lat: post.lat, lng: post.lng }
@@ -167,6 +255,53 @@ function listPreviewPosts(limit: number, cursor?: string) {
     )
     .all(limit);
 }
+
+function listFeedTrips(includeDrafts: boolean) {
+  const draftClause = includeDrafts ? "1 = 1" : "p.is_draft = 0";
+  const trips = db
+    .prepare(
+      `SELECT DISTINCT t.id, t.slug, t.title, t.sort_order
+       FROM trip t
+       WHERE t.id IN (
+         SELECT p.trip_id FROM post p WHERE p.trip_id = t.id AND ${draftClause}
+         UNION
+         SELECT c.trip_id FROM post p
+         INNER JOIN chapter c ON c.id = p.chapter_id
+         WHERE ${draftClause}
+       )
+       ORDER BY t.sort_order, t.title COLLATE NOCASE`,
+    )
+    .all() as Array<{ id: string; slug: string; title: string; sort_order: number }>;
+  const chapterStmt = db.prepare(
+    `SELECT DISTINCT c.id, c.slug, c.title, c.sort_order
+     FROM chapter c
+     INNER JOIN post p ON p.chapter_id = c.id AND ${draftClause}
+     WHERE c.trip_id = ?
+     ORDER BY c.sort_order, c.title COLLATE NOCASE`,
+  );
+  return {
+    trips: trips.map((trip) => ({
+      id: trip.id,
+      slug: trip.slug,
+      title: trip.title,
+      chapters: (
+        chapterStmt.all(trip.id) as Array<{ id: string; slug: string; title: string; sort_order: number }>
+      ).map((chapter) => ({
+        id: chapter.id,
+        slug: chapter.slug,
+        title: chapter.title,
+      })),
+    })),
+  };
+}
+
+app.get("/api/trips", (_req, res) => {
+  res.json(listFeedTrips(false));
+});
+
+app.get("/api/preview/trips", (_req, res) => {
+  res.json(listFeedTrips(true));
+});
 
 app.get("/api/posts", (req, res) => {
   const limit = Math.min(Number(req.query.limit ?? 12), 50);
@@ -251,11 +386,80 @@ app.get("/api/admin/posts/:slug", admin, (req, res) => {
   res.json(mapPost(post as Parameters<typeof mapPost>[0]));
 });
 
+app.get("/api/admin/trips", admin, (_req, res) => {
+  const trips = db
+    .prepare(`SELECT id, slug, title, sort_order FROM trip ORDER BY sort_order, title COLLATE NOCASE`)
+    .all() as Array<{ id: string; slug: string; title: string; sort_order: number }>;
+  const chapters = db
+    .prepare(
+      `SELECT id, trip_id, slug, title, sort_order FROM chapter ORDER BY sort_order, title COLLATE NOCASE`,
+    )
+    .all() as Array<{ id: string; trip_id: string; slug: string; title: string; sort_order: number }>;
+  res.json({
+    trips: trips.map((trip) => ({
+      id: trip.id,
+      slug: trip.slug,
+      title: trip.title,
+      chapters: chapters
+        .filter((chapter) => chapter.trip_id === trip.id)
+        .map((chapter) => ({
+          id: chapter.id,
+          slug: chapter.slug,
+          title: chapter.title,
+          tripId: chapter.trip_id,
+        })),
+    })),
+  });
+});
+
+app.post("/api/admin/trips", admin, (req, res) => {
+  const title = String(req.body.title ?? "").trim();
+  if (!title) {
+    res.status(400).json({ error: "Trip title required" });
+    return;
+  }
+  const id = uuid();
+  const slug = uniqueTripSlug(db, title);
+  db.prepare(
+    `INSERT INTO trip (id, slug, title, sort_order) VALUES (?, ?, ?, COALESCE((SELECT MAX(sort_order) + 1 FROM trip), 0))`,
+  ).run(id, slug, title);
+  res.status(201).json({ id, slug, title, chapters: [] });
+});
+
+app.post("/api/admin/chapters", admin, (req, res) => {
+  const tripId = String(req.body.tripId ?? "");
+  const title = String(req.body.title ?? "").trim();
+  if (!tripId) {
+    res.status(400).json({ error: "Trip required" });
+    return;
+  }
+  if (!title) {
+    res.status(400).json({ error: "Chapter title required" });
+    return;
+  }
+  const trip = db.prepare("SELECT id FROM trip WHERE id = ?").get(tripId);
+  if (!trip) {
+    res.status(400).json({ error: "Trip not found" });
+    return;
+  }
+  const id = uuid();
+  const slug = uniqueChapterSlug(db, tripId, title);
+  db.prepare(
+    `INSERT INTO chapter (id, trip_id, slug, title, sort_order)
+     VALUES (?, ?, ?, ?, COALESCE((SELECT MAX(sort_order) + 1 FROM chapter WHERE trip_id = ?), 0))`,
+  ).run(id, tripId, slug, title, tripId);
+  res.status(201).json({ id, slug, title, tripId });
+});
+
 app.get("/api/admin/posts", admin, (_req, res) => {
   const rows = db
     .prepare(
-      `SELECT id, slug, caption, taken_at, published_at, place_name, is_draft FROM post
-       ORDER BY is_draft DESC, COALESCE(published_at, created_at) DESC`,
+      `SELECT p.id, p.slug, p.caption, p.taken_at, p.published_at, p.place_name, p.is_draft,
+              c.title AS chapter_title, t.title AS trip_title
+       FROM post p
+       LEFT JOIN chapter c ON c.id = p.chapter_id
+       LEFT JOIN trip t ON t.id = COALESCE(c.trip_id, p.trip_id)
+       ORDER BY p.is_draft DESC, COALESCE(p.published_at, p.created_at) DESC`,
     )
     .all();
   const posts = (
@@ -267,6 +471,8 @@ app.get("/api/admin/posts", admin, (_req, res) => {
       published_at: string;
       place_name: string | null;
       is_draft: number;
+      chapter_title: string | null;
+      trip_title: string | null;
     }[]
   ).map((r) => {
     const thumb = db
@@ -281,6 +487,8 @@ app.get("/api/admin/posts", admin, (_req, res) => {
       placeName: r.place_name,
       isDraft: Boolean(r.is_draft),
       thumbnail: thumb?.public_url,
+      tripTitle: r.trip_title,
+      chapterTitle: r.chapter_title,
     };
   });
   res.json({ posts });
@@ -302,6 +510,14 @@ app.post("/api/posts", admin, upload.array("images", 10), async (req, res) => {
     const slugBase = req.body.slug ? String(req.body.slug) : placeName ?? takenAt;
     const slug = uniqueSlug(db, slugBase);
     const postId = uuid();
+    const organization = resolvePostOrganization(
+      formField(req.body, "tripId"),
+      formField(req.body, "chapterId"),
+    );
+    if (!organization.ok) {
+      res.status(400).json({ error: organization.error });
+      return;
+    }
 
     const saved = [];
     let metaTaken = takenAt;
@@ -316,9 +532,19 @@ app.post("/api/posts", admin, upload.array("images", 10), async (req, res) => {
     }
 
     db.prepare(
-      `INSERT INTO post (id, slug, caption, taken_at, place_name, lat, lng, is_draft, published_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 1, datetime('now'))`,
-    ).run(postId, slug, caption, metaTaken, placeName, metaLat, metaLng);
+      `INSERT INTO post (id, slug, caption, taken_at, place_name, lat, lng, trip_id, chapter_id, is_draft, published_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'))`,
+    ).run(
+      postId,
+      slug,
+      caption,
+      metaTaken,
+      placeName,
+      metaLat,
+      metaLng,
+      organization.tripId,
+      organization.chapterId,
+    );
 
     const insertImg = db.prepare(
       `INSERT INTO post_image (id, post_id, sort_order, storage_key, public_url, width, height, has_location_metadata, has_date_metadata)
@@ -501,17 +727,38 @@ app.patch("/api/posts/:id", admin, (req, res) => {
     takenAt?: string;
     lat?: number | null;
     lng?: number | null;
+    chapterId?: string | null;
+    tripId?: string | null;
   };
   const caption = body.caption ?? existing.caption;
   const placeName = body.placeName ?? existing.place_name;
   const takenAt = body.takenAt ?? existing.taken_at;
   const lat = body.lat === undefined ? existing.lat : body.lat;
   const lng = body.lng === undefined ? existing.lng : body.lng;
+
+  const existingRow = existing as { chapter_id?: string | null; trip_id?: string | null };
+  const tripRaw = body.tripId !== undefined ? body.tripId : existingRow.trip_id;
+  const chapterRaw = body.chapterId !== undefined ? body.chapterId : existingRow.chapter_id;
+  const organization = resolvePostOrganization(tripRaw, chapterRaw);
+  if (!organization.ok) {
+    res.status(400).json({ error: organization.error });
+    return;
+  }
+
   db.prepare(
     `UPDATE post
-     SET caption = ?, place_name = ?, taken_at = ?, lat = ?, lng = ?, updated_at = datetime('now')
+     SET caption = ?, place_name = ?, taken_at = ?, lat = ?, lng = ?, trip_id = ?, chapter_id = ?, updated_at = datetime('now')
      WHERE id = ?`,
-  ).run(caption, placeName, takenAt, lat, lng, req.params.id);
+  ).run(
+    caption,
+    placeName,
+    takenAt,
+    lat,
+    lng,
+    organization.tripId,
+    organization.chapterId,
+    req.params.id,
+  );
   const updated = db.prepare("SELECT * FROM post WHERE id = ?").get(req.params.id);
   res.json(mapPost(updated as Parameters<typeof mapPost>[0]));
 });

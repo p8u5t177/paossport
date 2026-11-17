@@ -30,7 +30,10 @@ import { mapProfileLocation, type ProfileRow } from "./profile-map.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT ?? 3847);
-const ADMIN_SECRET = process.env.ADMIN_SECRET;
+function adminSecret() {
+  const value = process.env.ADMIN_SECRET?.trim();
+  return value || undefined;
+}
 const clientDist = path.resolve(__dirname, "../../client/dist");
 
 const db = getDb();
@@ -211,12 +214,13 @@ app.get("/api/preview/posts/:slug", (req, res) => {
 const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20 });
 
 app.post("/api/auth/login", loginLimiter, (req, res) => {
-  if (!ADMIN_SECRET) {
+  const expected = adminSecret();
+  if (!expected) {
     res.status(503).json({ error: "Admin access is not configured" });
     return;
   }
   const { secret } = req.body as { secret?: string };
-  if (secret !== ADMIN_SECRET) {
+  if (secret?.trim() !== expected) {
     res.status(401).json({ error: "Invalid secret" });
     return;
   }

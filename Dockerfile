@@ -6,7 +6,8 @@ RUN apk add --no-cache python3 make g++
 COPY package.json package-lock.json ./
 COPY client/package.json client/
 COPY server/package.json server/
-RUN npm ci
+# Coolify may inject NODE_ENV=production at build time; devDeps are required to compile.
+RUN npm ci --include=dev
 
 COPY client client
 COPY server server

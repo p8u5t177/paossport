@@ -27,9 +27,11 @@ COPY --from=build /app/client/dist client/dist
 
 ENV NODE_ENV=production \
     PORT=3000 \
-    DATA_DIR=/data \
-    DATABASE_PATH=/data/app.db \
-    MEDIA_ROOT=/data/media
+    DATA_DIR=/app/data \
+    DATABASE_PATH=/app/data/app.db \
+    MEDIA_ROOT=/app/data/media
+
+RUN mkdir -p /app/data/media
 
 EXPOSE 3000
 CMD ["node", "server/dist/index.js"]

@@ -114,9 +114,12 @@ type Post = {
 };
 
 type AdminChapter = { id: string; slug: string; title: string; tripId: string };
-type AdminTrip = { id: string; slug: string; title: string; chapters: AdminChapter[] };
+type AdminTrip = { id: string; slug: string; title: string; albumId?: string | null; chapters: AdminChapter[] };
+type AdminAlbum = { id: string; slug: string; title: string; tripCount: number; featured?: boolean };
 type FeedChapter = { id: string; slug: string; title: string };
 type FeedTrip = { id: string; slug: string; title: string; chapters: FeedChapter[] };
+type FeedAlbum = { id: string; slug: string; title: string; featured?: boolean; trips: FeedTrip[] };
+type FeedCatalog = { albums: FeedAlbum[]; trips: FeedTrip[] };
 
 type SiteMode = {
   preview: boolean;
@@ -211,112 +214,316 @@ function tripCoverPost(posts: Post[], tripId: string) {
   return postsForTrip(posts, tripId)[0];
 }
 
-function TripSelector({
-  trips,
+function catalogAllTrips(catalog: FeedCatalog): FeedTrip[] {
+  return catalog.trips;
+}
+
+function albumMosaicUrls(posts: Post[], album: FeedAlbum): string[] {
+  const urls: string[] = [];
+  for (const trip of album.trips) {
+    const cover = tripCoverPost(posts, trip.id);
+    if (!cover) continue;
+    const thumb = storyThumbnail(cover);
+    if (thumb?.url) urls.push(thumb.url);
+    if (urls.length >= 4) break;
+  }
+  return urls;
+}
+
+function TripStoryChip({
+  trip,
   posts,
-  selectedId,
+  selected,
   onSelect,
 }: {
-  trips: FeedTrip[];
+  trip: FeedTrip;
   posts: Post[];
-  selectedId: string;
-  onSelect: (id: string) => void;
+  selected: boolean;
+  onSelect: () => void;
 }) {
+  const cover = tripCoverPost(posts, trip.id);
+  const thumb = cover ? storyThumbnail(cover) : null;
   return (
-    <div className="story-selector-shell" aria-label="Trips">
-      <div className="story-selector" role="tablist" aria-orientation="horizontal">
-        {trips.map((trip) => {
-          const selected = trip.id === selectedId;
-          const cover = tripCoverPost(posts, trip.id);
-          const thumb = cover ? storyThumbnail(cover) : null;
-          return (
-            <button
-              key={trip.id}
-              type="button"
-              role="tab"
-              aria-selected={selected}
-              className={`story-chip${selected ? " story-chip-selected" : ""}`}
-              onClick={() => onSelect(trip.id)}
-            >
-              <span className="story-chip-ring" aria-hidden>
-                {thumb ? (
-                  <img
-                    className="story-chip-thumb"
-                    src={thumb.url}
-                    alt=""
-                    loading="lazy"
-                    decoding="async"
-                    draggable={false}
-                  />
-                ) : (
-                  <span className="story-chip-fallback">
-                    <Icon name="journey" size={22} />
-                  </span>
-                )}
-              </span>
-              <span className="story-chip-label" title={trip.title}>
-                {trip.title}
-              </span>
-            </button>
-          );
-        })}
+    <button
+      type="button"
+      role="tab"
+      aria-selected={selected}
+      aria-label={`Trip: ${trip.title}`}
+      className={`story-chip${selected ? " story-chip-selected" : ""}`}
+      onClick={onSelect}
+    >
+      <span className="story-chip-ring" aria-hidden>
+        {thumb ? (
+          <img
+            className="story-chip-thumb"
+            src={thumb.url}
+            alt=""
+            loading="lazy"
+            decoding="async"
+            draggable={false}
+          />
+        ) : (
+          <span className="story-chip-fallback">
+            <Icon name="journey" size={22} />
+          </span>
+        )}
+      </span>
+      <span className="story-chip-label" title={trip.title}>
+        {trip.title}
+      </span>
+    </button>
+  );
+}
+
+function AlbumStoryChip({
+  album,
+  posts,
+  selected,
+  onSelect,
+}: {
+  album: FeedAlbum;
+  posts: Post[];
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  const mosaic = albumMosaicUrls(posts, album);
+  const count = album.trips.length;
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={selected}
+      aria-label={`Collection: ${album.title}, ${count} trips`}
+      className={`story-chip story-chip-album${selected ? " story-chip-selected" : ""}`}
+      onClick={onSelect}
+    >
+      <span className="story-chip-ring story-chip-ring-album" aria-hidden>
+        {mosaic.length === 0 ? (
+          <span className="story-chip-fallback">
+            <Icon name="layers" size={22} />
+          </span>
+        ) : mosaic.length === 1 ? (
+          <img
+            className="story-chip-thumb"
+            src={mosaic[0]}
+            alt=""
+            loading="lazy"
+            decoding="async"
+            draggable={false}
+          />
+        ) : (
+          <span className="story-chip-album-mosaic">
+            {mosaic.slice(0, 4).map((url, index) => (
+              <img key={`${url}-${index}`} src={url} alt="" loading="lazy" decoding="async" draggable={false} />
+            ))}
+            {Array.from({ length: Math.max(0, 4 - mosaic.length) }, (_, index) => (
+              <span key={`pad-${index}`} className="story-chip-album-mosaic-pad" />
+            ))}
+          </span>
+        )}
+      </span>
+      <span className="story-chip-label" title={album.title}>
+        {album.title}
+      </span>
+      <span className="story-chip-meta">
+        {count} trip{count === 1 ? "" : "s"}
+      </span>
+    </button>
+  );
+}
+
+function StoryCatalogSelector({
+  catalog,
+  posts,
+  openAlbumId,
+  selectedTripId,
+  onOpenAlbum,
+  onCloseAlbum,
+  onSelectTrip,
+}: {
+  catalog: FeedCatalog;
+  posts: Post[];
+  openAlbumId: string | null;
+  selectedTripId: string;
+  onOpenAlbum: (albumId: string) => void;
+  onCloseAlbum: () => void;
+  onSelectTrip: (tripId: string) => void;
+}) {
+  const openAlbum = openAlbumId ? catalog.albums.find((album) => album.id === openAlbumId) : undefined;
+
+  return (
+    <div className="story-selector-shell">
+      {openAlbum ? (
+        <button type="button" className="story-album-back" onClick={onCloseAlbum}>
+          ← {openAlbum.title}
+        </button>
+      ) : null}
+      <div
+        className="story-selector"
+        role="tablist"
+        aria-label={openAlbum ? `Trips in ${openAlbum.title}` : "Stories"}
+        aria-orientation="horizontal"
+      >
+        {openAlbum
+          ? openAlbum.trips.map((trip) => (
+              <TripStoryChip
+                key={trip.id}
+                trip={trip}
+                posts={posts}
+                selected={trip.id === selectedTripId}
+                onSelect={() => onSelectTrip(trip.id)}
+              />
+            ))
+          : (
+            <>
+              {catalog.albums.map((album) => (
+                <AlbumStoryChip
+                  key={album.id}
+                  album={album}
+                  posts={posts}
+                  selected={false}
+                  onSelect={() => onOpenAlbum(album.id)}
+                />
+              ))}
+              {catalog.albums.length > 0 && catalog.trips.length > 0 ? (
+                <div className="story-selector-divider" role="presentation" aria-hidden />
+              ) : null}
+              {catalog.trips.map((trip) => (
+                <TripStoryChip
+                  key={trip.id}
+                  trip={trip}
+                  posts={posts}
+                  selected={trip.id === selectedTripId}
+                  onSelect={() => onSelectTrip(trip.id)}
+                />
+              ))}
+            </>
+          )}
       </div>
     </div>
   );
 }
 
-function FeedViewControls({
+function FeedViewRuleMenu({
+  open,
+  onOpenChange,
   view,
-  chapterId,
-  chapters,
-  canGroup,
+  detailLabel,
   onViewChange,
-  onChapterChange,
 }: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
   view: FeedViewMode;
-  chapterId: string;
-  chapters: FeedChapter[];
-  canGroup: boolean;
+  detailLabel: string;
   onViewChange: (view: FeedViewMode) => void;
-  onChapterChange: (id: string) => void;
 }) {
-  const grouped = view === "grouped";
+  const anchorRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const root = anchorRef.current;
+      if (root && !root.contains(event.target as Node)) onOpenChange(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onOpenChange(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open, onOpenChange]);
+
+  const pickView = (next: FeedViewMode) => {
+    onViewChange(next);
+    onOpenChange(false);
+  };
+
   return (
-    <div className="feed-view-bar" role="toolbar" aria-label="View for this trip">
-      <span className="feed-view-label">View</span>
+    <div className="feed-view-rule-anchor" ref={anchorRef}>
       <button
         type="button"
-        className={`feed-view-pill${!grouped ? " feed-view-pill-selected" : ""}`}
-        aria-pressed={!grouped}
-        onClick={() => onViewChange("timeline")}
+        className={`feed-rule-view-trigger${open ? " feed-rule-view-trigger-open" : ""}`}
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        aria-label={`View: ${detailLabel}`}
+        onClick={() => onOpenChange(!open)}
       >
-        Timeline
+        <span>{detailLabel}</span>
+        <svg
+          className={`feed-rule-view-chevron${open ? " feed-rule-view-chevron-open" : ""}`}
+          width={11}
+          height={11}
+          viewBox="0 0 12 12"
+          aria-hidden
+        >
+          <path
+            d="M3 4.5 6 7.5 9 4.5"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.6"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
       </button>
-      {canGroup ? (
-        <button
-          type="button"
-          className={`feed-view-pill${grouped ? " feed-view-pill-selected" : ""}`}
-          aria-pressed={grouped}
-          onClick={() => onViewChange("grouped")}
-        >
-          Grouped by
-        </button>
+      {open ? (
+        <div className="feed-view-popover" role="dialog" aria-label="View for this trip">
+          <p className="feed-view-label">View</p>
+          <button
+            type="button"
+            className={`feed-view-option${view === "timeline" ? " feed-view-option-selected" : ""}`}
+            onClick={() => pickView("timeline")}
+          >
+            <span className="feed-view-option-title">Timeline</span>
+            <span className="feed-view-option-hint">Newest first</span>
+            {view === "timeline" ? <span className="feed-view-option-check" aria-hidden>✓</span> : null}
+          </button>
+          <button
+            type="button"
+            className={`feed-view-option${view === "grouped" ? " feed-view-option-selected" : ""}`}
+            onClick={() => pickView("grouped")}
+          >
+            <span className="feed-view-option-title">Grouped by journey</span>
+            <span className="feed-view-option-hint">Story arcs inside this trip</span>
+            {view === "grouped" ? <span className="feed-view-option-check" aria-hidden>✓</span> : null}
+          </button>
+        </div>
       ) : null}
-      {grouped && canGroup && chapters.length > 0 ? (
-        <select
-          className="feed-view-chapter-select"
-          aria-label="Chapter"
-          value={chapterId}
-          onChange={(e) => onChapterChange(e.target.value)}
-        >
-          <option value={ALL_CHAPTERS}>All chapters</option>
-          {chapters.map((chapter) => (
-            <option key={chapter.id} value={chapter.id}>
-              {chapter.title}
-            </option>
-          ))}
-        </select>
-      ) : null}
+    </div>
+  );
+}
+
+function FeedChapterBar({
+  chapterId,
+  chapters,
+  onChapterChange,
+}: {
+  chapterId: string;
+  chapters: FeedChapter[];
+  onChapterChange: (id: string) => void;
+}) {
+  return (
+    <div className="feed-chapter-bar">
+      <label className="feed-view-label" htmlFor="feed-chapter-select">
+        Journey
+      </label>
+      <select
+        id="feed-chapter-select"
+        className="feed-view-chapter-select"
+        aria-label="Journey"
+        value={chapterId}
+        onChange={(e) => onChapterChange(e.target.value)}
+      >
+        <option value={ALL_CHAPTERS}>All journeys</option>
+        {chapters.map((chapter) => (
+          <option key={chapter.id} value={chapter.id}>
+            {chapter.title}
+          </option>
+        ))}
+      </select>
     </div>
   );
 }
@@ -454,26 +661,10 @@ function ProfileDisplayName({ displayName, hero = false }: { displayName: string
   return <>{displayNameLead(displayName)}</>;
 }
 
-function profileBioLines(bio: string) {
-  const trimmed = bio.trim();
-  if (!trimmed) return [];
-  const byNewline = trimmed.split(/\n+/).map((line) => line.trim()).filter(Boolean);
-  if (byNewline.length > 1) return byNewline;
-  const sentences = trimmed.match(/[^.!?]+[.!?]+/g)?.map((line) => line.trim()).filter(Boolean);
-  if (sentences && sentences.length > 1) return sentences;
-  return [trimmed];
-}
-
 function ProfileBio({ bio }: { bio: string }) {
-  const lines = profileBioLines(bio);
-  if (lines.length === 0) return null;
-  return (
-    <div className="bio">
-      {lines.map((line) => (
-        <p key={line}>{line}</p>
-      ))}
-    </div>
-  );
+  const text = bio.trim().replace(/\s*\n+\s*/g, " ");
+  if (!text) return null;
+  return <p className="bio">{text}</p>;
 }
 
 function BrandName({ hero = false, className }: { hero?: boolean; className?: string }) {
@@ -491,12 +682,13 @@ function Icon({
   name,
   size = 20,
 }: {
-  name: "pin" | "grid" | "arrow" | "share" | "plus" | "x" | "journey";
+  name: "pin" | "grid" | "arrow" | "share" | "plus" | "x" | "journey" | "layers";
   size?: number;
 }) {
   const paths = {
     pin: <path d="M12 21s7-6.2 7-13A7 7 0 1 0 5 8c0 6.8 7 13 7 13Zm0-10a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" />,
     journey: <path d="M3 6.5 9 4.5l6 2 6-2v13l-6 2-6-2-6 2V6.5Z M9 4.5v13M15 6.5v13" />,
+    layers: <path d="M4 9.5 12 5l8 4.5-8 4.5-8-4.5Zm0 5.5 8 4.5 8-4.5M12 14v6" />,
     grid: <path d="M4 4h6v6H4V4Zm10 0h6v6h-6V4ZM4 14h6v6H4v-6Zm10 0h6v6h-6v-6Z" />,
     arrow: <path d="m15 18-6-6 6-6" />,
     share: <path d="M12 16V3m0 0L7 8m5-5 5 5M5 13v7h14v-7" />,
@@ -844,7 +1036,7 @@ function Carousel({ images, linkedSlug, postBase = "/p" }: { images: Image[]; li
           return (
             <div className={`carousel-slide${fullPhoto ? " carousel-slide-contain" : ""}`} key={image.id}>
               {linkedSlug ? (
-                <Link to={`${postBase}/${linkedSlug}`} aria-label="Open journey">
+                <Link to={`${postBase}/${linkedSlug}`} aria-label="Open journal">
                   <CarouselPhoto
                     image={image}
                     alt={image.alt || `Travel photograph ${index + 1} of ${images.length}`}
@@ -904,13 +1096,23 @@ function PreviewSiteBanner() {
   return (
     <div className="preview-site-banner" role="status">
       <span>Preview site</span>
-      <p>Drafts and unpublished journeys appear here. The live journal is at <Link to="/">your domain</Link>.</p>
+      <p>Drafts and unpublished journals appear here. The live site is at <Link to="/">your domain</Link>.</p>
     </div>
   );
 }
 
-function PostCard({ post, profile, site }: { post: Post; profile: Profile; site: SiteMode }) {
-  const grouping = journeyGroupingLabel(post);
+function PostCard({
+  post,
+  profile,
+  site,
+  showJourneyGrouping = true,
+}: {
+  post: Post;
+  profile: Profile;
+  site: SiteMode;
+  showJourneyGrouping?: boolean;
+}) {
+  const grouping = showJourneyGrouping ? journeyGroupingLabel(post) : null;
   return (
     <article className={`post-card${post.isDraft ? " post-card-draft" : ""}`}>
       <header className="post-header">
@@ -931,7 +1133,7 @@ function PostCard({ post, profile, site }: { post: Post; profile: Profile; site:
           <strong>{profile.username}</strong>
           {post.caption.trim() && <p>{post.caption}</p>}
         </div>
-        <Link className="quiet-link" to={`${site.postBase}/${post.slug}`}>View journey</Link>
+        <Link className="quiet-link" to={`${site.postBase}/${post.slug}`}>View journal</Link>
       </div>
     </article>
   );
@@ -940,22 +1142,26 @@ function PostCard({ post, profile, site }: { post: Post; profile: Profile; site:
 function JournalFeed({ site }: { site: SiteMode }) {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [posts, setPosts] = useState<Post[]>([]);
-  const [trips, setTrips] = useState<FeedTrip[]>([]);
+  const [catalog, setCatalog] = useState<FeedCatalog>({ albums: [], trips: [] });
+  const [openAlbumId, setOpenAlbumId] = useState<string | null>(null);
   const [selectedTripId, setSelectedTripId] = useState<string | null>(null);
   const [tripFeedPrefs, setTripFeedPrefs] = useState<Record<string, TripFeedPrefs>>({});
+  const [feedViewMenuOpen, setFeedViewMenuOpen] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+
+  const allTrips = useMemo(() => catalogAllTrips(catalog), [catalog]);
 
   const load = async () => {
     try {
       const [profileData, postsData, tripsData] = await Promise.all([
         api<Profile>("/api/profile"),
         api<{ posts: Post[] }>(`${site.postsListUrl}?limit=50`),
-        api<{ trips: FeedTrip[] }>(site.tripsListUrl),
+        api<FeedCatalog>(site.tripsListUrl),
       ]);
       setProfile(profileData);
       setPosts(postsData.posts);
-      setTrips(tripsData.trips);
+      setCatalog({ albums: tripsData.albums ?? [], trips: tripsData.trips ?? [] });
       setError("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
@@ -968,21 +1174,34 @@ function JournalFeed({ site }: { site: SiteMode }) {
   // oxlint-disable-next-line react/set-state-in-effect
   useEffect(() => { void load(); }, [site.postsListUrl, site.tripsListUrl]);
 
-  const tripBrowse = trips.length > 0;
+  const tripBrowse = catalog.albums.length > 0 || catalog.trips.length > 0;
 
   useEffect(() => {
     if (!tripBrowse) {
       setSelectedTripId(null);
+      setOpenAlbumId(null);
       return;
     }
-    setSelectedTripId((current) =>
-      current && trips.some((trip) => trip.id === current) ? current : (trips[0]?.id ?? null),
-    );
-  }, [trips, tripBrowse]);
+    const featuredAlbum = catalog.albums.find((album) => album.featured && album.trips.length > 0);
+    const tripIds = new Set(allTrips.map((trip) => trip.id));
+    if (featuredAlbum) {
+      setOpenAlbumId(featuredAlbum.id);
+      setSelectedTripId((current) => {
+        if (current && tripIds.has(current)) return current;
+        return featuredAlbum.trips[0]?.id ?? null;
+      });
+      return;
+    }
+    setOpenAlbumId(null);
+    setSelectedTripId((current) => {
+      if (current && tripIds.has(current)) return current;
+      return catalog.trips[0]?.id ?? catalog.albums[0]?.trips[0]?.id ?? null;
+    });
+  }, [allTrips, catalog.albums, catalog.trips, tripBrowse]);
 
   const activeTrip = useMemo(
-    () => (selectedTripId ? trips.find((trip) => trip.id === selectedTripId) : undefined),
-    [trips, selectedTripId],
+    () => (selectedTripId ? allTrips.find((trip) => trip.id === selectedTripId) : undefined),
+    [allTrips, selectedTripId],
   );
 
   const activeTripPrefs = useMemo(() => {
@@ -1005,30 +1224,46 @@ function JournalFeed({ site }: { site: SiteMode }) {
     }));
   };
 
-  const groupedChapters = useMemo(() => {
-    if (!activeTrip) return [];
-    if (chapterId === ALL_CHAPTERS) return activeTrip.chapters;
-    return activeTrip.chapters.filter((chapter) => chapter.id === chapterId);
-  }, [activeTrip, chapterId]);
+  const groupedFeedPosts = useMemo(() => {
+    if (chapterId === ALL_CHAPTERS) return tripPosts;
+    return tripPosts.filter((post) => post.chapter?.id === chapterId);
+  }, [chapterId, tripPosts]);
 
   const feedRule = useMemo(() => {
     if (!tripBrowse) return site.preview ? "Preview feed" : "Latest places";
     if (!activeTrip) return site.preview ? "Preview feed" : "Latest places";
     if (feedView === "timeline") return activeTrip.title;
-    if (chapterId === ALL_CHAPTERS) return activeTrip.title;
-    const chapter = activeTrip.chapters.find((item) => item.id === chapterId);
-    return chapter?.title ?? activeTrip.title;
-  }, [activeTrip, chapterId, feedView, site.preview, tripBrowse]);
+    return activeTrip.title;
+  }, [activeTrip, feedView, site.preview, tripBrowse]);
 
   const feedRuleDetail = useMemo(() => {
-    if (!tripBrowse) return null;
+    if (!tripBrowse || !activeTrip) return null;
     if (feedView === "timeline") return "Timeline · newest first";
-    if (chapterId === ALL_CHAPTERS) return "Grouped by chapter";
-    return "One chapter";
-  }, [chapterId, feedView, tripBrowse]);
+    if (chapterId === ALL_CHAPTERS) return "Timeline · newest first";
+    const chapter = activeTrip.chapters.find((item) => item.id === chapterId);
+    return chapter?.title ?? "One journey";
+  }, [activeTrip, chapterId, feedView, tripBrowse]);
+
+  useEffect(() => {
+    setFeedViewMenuOpen(false);
+  }, [selectedTripId]);
 
   const onTripSelect = (tripId: string) => {
     setSelectedTripId(tripId);
+  };
+
+  const onOpenAlbum = (albumId: string) => {
+    const album = catalog.albums.find((item) => item.id === albumId);
+    setOpenAlbumId(albumId);
+    if (album?.trips[0]) setSelectedTripId(album.trips[0].id);
+  };
+
+  const onCloseAlbum = () => {
+    setOpenAlbumId(null);
+    setSelectedTripId((current) => {
+      if (current && catalog.trips.some((trip) => trip.id === current)) return current;
+      return catalog.trips[0]?.id ?? catalog.albums[0]?.trips[0]?.id ?? null;
+    });
   };
 
   const onFeedViewChange = (view: FeedViewMode) => {
@@ -1078,22 +1313,15 @@ function JournalFeed({ site }: { site: SiteMode }) {
           {profile.bio ? <ProfileBio bio={profile.bio} /> : null}
           {tripBrowse && selectedTripId && activeTrip ? (
             <div className="trip-feed-controls">
-              <TripSelector
-                trips={trips}
+              <StoryCatalogSelector
+                catalog={catalog}
                 posts={posts}
-                selectedId={selectedTripId}
-                onSelect={onTripSelect}
+                openAlbumId={openAlbumId}
+                selectedTripId={selectedTripId}
+                onOpenAlbum={onOpenAlbum}
+                onCloseAlbum={onCloseAlbum}
+                onSelectTrip={onTripSelect}
               />
-              {canGroupByChapter ? (
-                <FeedViewControls
-                  view={feedView}
-                  chapterId={chapterId}
-                  chapters={activeTrip.chapters}
-                  canGroup={canGroupByChapter}
-                  onViewChange={onFeedViewChange}
-                  onChapterChange={onChapterChange}
-                />
-              ) : null}
             </div>
           ) : null}
         </div>
@@ -1106,32 +1334,35 @@ function JournalFeed({ site }: { site: SiteMode }) {
       <main className="page-shell feed-page">
       <div className="feed-rule">
         <span>{feedRule}</span>
-        {feedRuleDetail ? <span className="feed-rule-detail">{feedRuleDetail}</span> : <Icon name="grid" size={16} />}
+        {showTripFeed && canGroupByChapter && feedRuleDetail ? (
+          <FeedViewRuleMenu
+            open={feedViewMenuOpen}
+            onOpenChange={setFeedViewMenuOpen}
+            view={feedView}
+            detailLabel={feedRuleDetail}
+            onViewChange={onFeedViewChange}
+          />
+        ) : feedRuleDetail ? (
+          <span className="feed-rule-detail">{feedRuleDetail}</span>
+        ) : (
+          <Icon name="grid" size={16} />
+        )}
       </div>
+      {showGroupedFeed && activeTrip && activeTrip.chapters.length > 0 ? (
+        <FeedChapterBar
+          chapterId={chapterId}
+          chapters={activeTrip.chapters}
+          onChapterChange={onChapterChange}
+        />
+      ) : null}
       {posts.length === 0 ? (
-        <div className="state-card"><p className="eyebrow">The road starts here</p><h2>No posts yet.</h2><p>{site.preview ? "Save a journey from admin to see it here before publishing." : "Visit the private admin page to publish your first journey."}</p></div>
+        <div className="state-card"><p className="eyebrow">The road starts here</p><h2>No journals yet.</h2><p>{site.preview ? "Save a journal from admin to see it here before publishing." : "Visit the private admin page to publish your first journal."}</p></div>
       ) : showGroupedFeed ? (
-        <div className="feed-list feed-list-grouped">
-          {groupedChapters.map((chapter) => {
-            const chapterPosts = tripPosts.filter((post) => post.chapter?.id === chapter.id);
-            if (chapterPosts.length === 0) return null;
-            return (
-              <section key={chapter.id} className="feed-chapter-block">
-                <header className="feed-chapter-heading">
-                  <h2>{chapter.title}</h2>
-                  <p>
-                    {chapterPosts.length} journey{chapterPosts.length === 1 ? "" : "s"}
-                  </p>
-                </header>
-                <div className="feed-list feed-list-nested">
-                  {chapterPosts.map((post) => (
-                    <PostCard post={post} profile={profile} site={site} key={post.id} />
-                  ))}
-                </div>
-              </section>
-            );
-          })}
-        </div>
+        <section className="feed-list">
+          {groupedFeedPosts.map((post) => (
+            <PostCard post={post} profile={profile} site={site} showJourneyGrouping={false} key={post.id} />
+          ))}
+        </section>
       ) : (
         <section className="feed-list">
           {timelineFeed.map((post) => <PostCard post={post} profile={profile} site={site} key={post.id} />)}
@@ -1280,21 +1511,28 @@ type AdminPost = {
 function JourneyOrganizationFields({
   tripId,
   chapterId,
+  albumId,
   onTripIdChange,
   onChapterIdChange,
+  onAlbumIdChange,
 }: {
   tripId: string;
   chapterId: string;
+  albumId: string;
   onTripIdChange: (id: string) => void;
   onChapterIdChange: (id: string) => void;
+  onAlbumIdChange: (id: string) => void;
 }) {
   const [trips, setTrips] = useState<AdminTrip[]>([]);
+  const [albums, setAlbums] = useState<AdminAlbum[]>([]);
   const [loading, setLoading] = useState(true);
   const [orgError, setOrgError] = useState("");
   const [newTripTitle, setNewTripTitle] = useState("");
   const [newChapterTitle, setNewChapterTitle] = useState("");
+  const [newAlbumTitle, setNewAlbumTitle] = useState("");
   const [addingTrip, setAddingTrip] = useState(false);
   const [addingChapter, setAddingChapter] = useState(false);
+  const [addingAlbum, setAddingAlbum] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const reloadTrips = async () => {
@@ -1302,9 +1540,14 @@ function JourneyOrganizationFields({
     setTrips(data.trips);
   };
 
+  const reloadAlbums = async () => {
+    const data = await api<{ albums: AdminAlbum[] }>("/api/admin/albums");
+    setAlbums(data.albums);
+  };
+
   useEffect(() => {
-    void reloadTrips()
-      .catch((err) => setOrgError(err instanceof Error ? err.message : "Could not load trips"))
+    void Promise.all([reloadTrips(), reloadAlbums()])
+      .catch((err) => setOrgError(err instanceof Error ? err.message : "Could not load structure"))
       .finally(() => setLoading(false));
   }, []);
 
@@ -1318,10 +1561,48 @@ function JourneyOrganizationFields({
     }
   }, [chapterId, loading, onTripIdChange, tripId, trips]);
 
+  useEffect(() => {
+    if (loading || !tripId) return;
+    const trip = trips.find((item) => item.id === tripId);
+    onAlbumIdChange(trip?.albumId ?? "");
+  }, [loading, onAlbumIdChange, tripId, trips]);
+
   const chapters = useMemo(() => {
     if (!tripId) return [];
     return trips.find((trip) => trip.id === tripId)?.chapters ?? [];
   }, [tripId, trips]);
+
+  const persistTripAlbum = async (nextTripId: string, nextAlbumId: string) => {
+    await api(`/api/admin/trips/${nextTripId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ albumId: nextAlbumId || null }),
+    });
+    await reloadTrips();
+  };
+
+  const createAlbum = async () => {
+    const title = newAlbumTitle.trim();
+    if (!title) return;
+    setBusy(true);
+    setOrgError("");
+    try {
+      const created = await api<AdminAlbum>("/api/admin/albums", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+      });
+      await reloadAlbums();
+      onAlbumIdChange(created.id);
+      if (tripId) await persistTripAlbum(tripId, created.id);
+      setAddingAlbum(false);
+      setNewAlbumTitle("");
+    } catch (err) {
+      setOrgError(err instanceof Error ? err.message : "Could not create collection");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const createTrip = async () => {
     const title = newTripTitle.trim();
@@ -1332,10 +1613,11 @@ function JourneyOrganizationFields({
       const created = await api<AdminTrip>("/api/admin/trips", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title }),
+        body: JSON.stringify({ title, albumId: albumId || null }),
       });
       await reloadTrips();
       onTripIdChange(created.id);
+      onAlbumIdChange(created.albumId ?? albumId);
       onChapterIdChange("");
       setAddingTrip(false);
       setNewTripTitle("");
@@ -1362,7 +1644,7 @@ function JourneyOrganizationFields({
       setAddingChapter(false);
       setNewChapterTitle("");
     } catch (err) {
-      setOrgError(err instanceof Error ? err.message : "Could not create chapter");
+      setOrgError(err instanceof Error ? err.message : "Could not create journey");
     } finally {
       setBusy(false);
     }
@@ -1370,9 +1652,9 @@ function JourneyOrganizationFields({
 
   return (
     <div className="organization-fields">
-      <p className="eyebrow">Journal structure</p>
+      <p className="eyebrow">Hierarchy</p>
       <p className="form-hint">
-        Optional. Trip can be saved on its own; add a chapter when you want finer grouping on the journal.
+        Optional. Collection → Trip → Journey → Journal. A trip can stand alone; add a journey when you want finer grouping within the trip.
       </p>
       {loading ? (
         <p className="form-hint">Loading trips…</p>
@@ -1395,6 +1677,52 @@ function JourneyOrganizationFields({
               ))}
             </select>
           </label>
+          <label>
+            Collection
+            <select
+              value={albumId}
+              disabled={!tripId || busy}
+              onChange={(e) => {
+                const next = e.target.value;
+                onAlbumIdChange(next);
+                if (tripId) void persistTripAlbum(tripId, next).catch((err) => setOrgError(err instanceof Error ? err.message : "Could not save collection"));
+              }}
+            >
+              <option value="">{tripId ? "None (shown on home row)" : "Choose a trip first"}</option>
+              {albums.map((album) => (
+                <option key={album.id} value={album.id}>
+                  {album.title}
+                  {album.tripCount > 0 ? ` · ${album.tripCount} trips` : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+          <p className="form-hint">Collections group trips in the journal selector. Each trip can belong to one collection.</p>
+          {!addingAlbum ? (
+            <button type="button" className="organization-text-button" onClick={() => setAddingAlbum(true)}>
+              + New collection
+            </button>
+          ) : (
+            <div className="organization-inline-add">
+              <label>
+                Collection title
+                <input value={newAlbumTitle} onChange={(e) => setNewAlbumTitle(e.target.value)} placeholder="Africa" />
+              </label>
+              <button type="button" className="primary-button" disabled={busy} onClick={() => void createAlbum()}>
+                Add
+              </button>
+              <button
+                type="button"
+                className="organization-text-button"
+                onClick={() => {
+                  setAddingAlbum(false);
+                  setNewAlbumTitle("");
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          )}
           {!addingTrip ? (
             <button type="button" className="organization-text-button" onClick={() => setAddingTrip(true)}>
               + New trip
@@ -1425,7 +1753,7 @@ function JourneyOrganizationFields({
             </div>
           )}
           <label>
-            Chapter
+            Journey
             <select
               value={chapterId}
               disabled={!tripId}
@@ -1442,12 +1770,12 @@ function JourneyOrganizationFields({
           {tripId &&
             (!addingChapter ? (
               <button type="button" className="organization-text-button" onClick={() => setAddingChapter(true)}>
-                + New chapter
+                + New journey
               </button>
             ) : (
               <div className="organization-inline-add">
                 <label>
-                  Chapter title
+                  Journey title
                   <input
                     value={newChapterTitle}
                     onChange={(e) => setNewChapterTitle(e.target.value)}
@@ -1483,8 +1811,9 @@ function AdminLayout() {
       <aside className="admin-sidebar">
         <Link to="/admin" className="wordmark"><span>P</span><BrandName /></Link>
         <nav>
-          <Link to="/admin">Posts</Link>
-          <Link to="/admin/new">New journey</Link>
+          <Link to="/admin">Journals</Link>
+          <Link to="/admin/new">New journal</Link>
+          <Link to="/admin/albums">Collections</Link>
           <Link to="/admin/profile">Profile</Link>
           <a href="/" target="_blank" rel="noreferrer">Main site</a>
         </nav>
@@ -1493,6 +1822,126 @@ function AdminLayout() {
       <div className="admin-mobile-nav"><Link to="/admin" className="wordmark"><span>P</span><BrandName /></Link><Link to="/admin/new" className="circle-button"><Icon name="plus" /></Link></div>
       <Outlet />
     </div>
+  );
+}
+
+function AdminAlbums() {
+  const [albums, setAlbums] = useState<AdminAlbum[]>([]);
+  const [title, setTitle] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  const load = () =>
+    api<{ albums: AdminAlbum[] }>("/api/admin/albums")
+      .then((data) => setAlbums(data.albums))
+      .catch((err) => setError(err instanceof Error ? err.message : "Could not load collections"))
+      .finally(() => setLoading(false));
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  const create = async (event: FormEvent) => {
+    event.preventDefault();
+    const nextTitle = title.trim();
+    if (!nextTitle) return;
+    setBusy(true);
+    setError("");
+    try {
+      await api("/api/admin/albums", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: nextTitle }),
+      });
+      setTitle("");
+      setLoading(true);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not create collection");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const setFeatured = async (album: AdminAlbum, featured: boolean) => {
+    setError("");
+    setAlbums((current) =>
+      current.map((item) => ({
+        ...item,
+        featured: featured ? item.id === album.id : item.id === album.id ? false : item.featured,
+      })),
+    );
+    try {
+      const updated = await api<AdminAlbum>(`/api/admin/albums/${album.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ featured }),
+      });
+      setAlbums((current) =>
+        current.map((item) => {
+          if (item.id === updated.id) return updated;
+          if (featured) return { ...item, featured: false };
+          return item;
+        }),
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update collection");
+      await load();
+    }
+  };
+
+  return (
+    <main className="admin-main">
+      <header className="admin-title">
+        <div>
+          <p className="eyebrow">Grouping</p>
+          <h1>Collections</h1>
+        </div>
+      </header>
+      <p className="form-hint" style={{ marginBottom: 20, maxWidth: 520 }}>
+        Collections appear as stacked chips on the journal home. Assign trips to a collection when creating or editing a journal. Mark one collection as featured to open it by default on the main page.
+      </p>
+      <form className="organization-inline-add admin-album-create" onSubmit={create}>
+        <label>
+          New collection
+          <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Africa" />
+        </label>
+        <button className="primary-button" type="submit" disabled={busy}>
+          {busy ? "Creating…" : "Create collection"}
+        </button>
+      </form>
+      {error ? <p className="form-error">{error}</p> : null}
+      {loading ? (
+        <div className="skeleton post-skeleton" />
+      ) : albums.length === 0 ? (
+        <div className="state-card">
+          <h2>No collections yet.</h2>
+          <p>Create one above, then link trips from a journal’s hierarchy fields.</p>
+        </div>
+      ) : (
+        <ul className="admin-album-list">
+          {albums.map((album) => (
+            <li key={album.id}>
+              <div className="admin-album-row-main">
+                <strong>{album.title}</strong>
+                <span className="admin-album-count">
+                  {album.tripCount} trip{album.tripCount === 1 ? "" : "s"}
+                </span>
+              </div>
+              <label className="admin-album-featured">
+                <input
+                  type="checkbox"
+                  checked={Boolean(album.featured)}
+                  onChange={(e) => void setFeatured(album, e.target.checked)}
+                />
+                Featured
+              </label>
+            </li>
+          ))}
+        </ul>
+      )}
+    </main>
   );
 }
 
@@ -1514,21 +1963,21 @@ function AdminDashboard() {
   return (
     <main className="admin-main">
       <header className="admin-title">
-        <div><p className="eyebrow">Your archive</p><h1>Journeys</h1></div>
+        <div><p className="eyebrow">Your archive</p><h1>Journals</h1></div>
         <div className="admin-title-actions">
           <a className="quiet-link" href="/preview" target="_blank" rel="noreferrer">Open preview site</a>
-          <Link to="/admin/new" className="primary-button"><Icon name="plus" size={18} /> New post</Link>
+          <Link to="/admin/new" className="primary-button"><Icon name="plus" size={18} /> New journal</Link>
         </div>
       </header>
       {loading ? <div className="skeleton post-skeleton" /> : posts.length === 0 ? (
-        <div className="state-card"><h2>Your journal is empty.</h2><Link to="/admin/new" className="primary-button">Add first journey</Link></div>
+        <div className="state-card"><h2>No journals yet.</h2><Link to="/admin/new" className="primary-button">Add first journal</Link></div>
       ) : (
         <div className="admin-post-list">
           {posts.map((post) => (
             <article key={post.id} className={post.isDraft ? "admin-post-draft" : ""}>
               <img src={post.thumbnail} alt="" />
               <div>
-                <strong>{post.placeName || "Untitled journey"}</strong>
+                <strong>{post.placeName || "Untitled journal"}</strong>
                 {post.isDraft ? <span className="status-pill status-draft">Preview only</span> : <span className="status-pill status-live">Live</span>}
                 <span>{formatDate(post.takenAt)}</span>
                 {(post.tripTitle || post.chapterTitle) && (
@@ -1572,6 +2021,7 @@ function NewPost() {
   const [error, setError] = useState("");
   const [tripId, setTripId] = useState("");
   const [chapterId, setChapterId] = useState("");
+  const [albumId, setAlbumId] = useState("");
   const [fileExif, setFileExif] = useState<FileExif[]>([]);
   const previews = useMemo(() => files.map((file) => ({ file, url: URL.createObjectURL(file) })), [files]);
   useEffect(() => () => previews.forEach((preview) => URL.revokeObjectURL(preview.url)), [previews]);
@@ -1635,6 +2085,13 @@ function NewPost() {
     data.append("tripId", tripId);
     data.append("chapterId", chapterId);
     try {
+      if (tripId) {
+        await api(`/api/admin/trips/${tripId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ albumId: albumId || null }),
+        });
+      }
       const post = await api<Post>("/api/posts", { method: "POST", body: data });
       if (tripId && !postTripId(post)) {
         setError("Trip didn't save. Try saving again.");
@@ -1642,7 +2099,7 @@ function NewPost() {
         return;
       }
       if (chapterId && !post.chapter) {
-        setError("Chapter didn't save. Try saving again.");
+        setError("Journey didn't save. Try saving again.");
         setBusy(false);
         return;
       }
@@ -1651,7 +2108,7 @@ function NewPost() {
   };
   return (
     <main className="admin-main editor-page">
-      <header className="admin-title"><div><p className="eyebrow">Add to the archive</p><h1>New journey</h1></div></header>
+      <header className="admin-title"><div><p className="eyebrow">Add to the archive</p><h1>New journal</h1></div></header>
       <form className="post-editor" onSubmit={submit}>
         <section className="upload-panel">
           <input ref={inputRef} hidden multiple type="file" accept="image/jpeg,image/png,image/webp" onChange={(e) => setFiles(Array.from(e.target.files || []).slice(0, 10))} />
@@ -1679,8 +2136,10 @@ function NewPost() {
           <JourneyOrganizationFields
             tripId={tripId}
             chapterId={chapterId}
+            albumId={albumId}
             onTripIdChange={setTripId}
             onChapterIdChange={setChapterId}
+            onAlbumIdChange={setAlbumId}
           />
           <label>Place<input value={place} onChange={(e) => setPlace(e.target.value)} placeholder="Kyoto, Japan" /></label>
           <label>Date taken <span className="optional">Optional</span><input type="datetime-local" value={takenAt} onChange={(e) => setTakenAt(e.target.value)} /></label>
@@ -1788,6 +2247,7 @@ function EditPost() {
   const [imagesBusy, setImagesBusy] = useState(false);
   const [tripId, setTripId] = useState("");
   const [chapterId, setChapterId] = useState("");
+  const [albumId, setAlbumId] = useState("");
   const addImagesRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     let cancelled = false;
@@ -1848,6 +2308,13 @@ function EditPost() {
     setBusy(true);
     setError("");
     try {
+      if (tripId) {
+        await api(`/api/admin/trips/${tripId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ albumId: albumId || null }),
+        });
+      }
       const updated = await api<Post>(`/api/posts/${post.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -1868,7 +2335,7 @@ function EditPost() {
         return;
       }
       if (chapterId && !updated.chapter) {
-        setError("Chapter didn't save. Try saving again.");
+        setError("Journey didn't save. Try saving again.");
         setBusy(false);
         return;
       }
@@ -1929,7 +2396,7 @@ function EditPost() {
 
   const removeImage = async (imageId: string) => {
     if (post.images.length <= 1) return;
-    if (!confirm("Remove this photo from the journey?")) return;
+    if (!confirm("Remove this photo from the journal?")) return;
     setImagesBusy(true);
     setError("");
     try {
@@ -1946,7 +2413,7 @@ function EditPost() {
     if (!fileList?.length) return;
     const remaining = 10 - post.images.length;
     if (remaining <= 0) {
-      setError("A journey can have at most 10 photos.");
+      setError("A journal can have at most 10 photos.");
       return;
     }
     const files = Array.from(fileList).slice(0, remaining);
@@ -1966,7 +2433,7 @@ function EditPost() {
   };
 
   const publish = async () => {
-    if (!confirm("Publish this journey to the live site?")) return;
+    if (!confirm("Publish this journal to the live site?")) return;
     setBusy(true);
     try {
       await api(`/api/posts/${post.id}/publish`, { method: "POST" });
@@ -1984,7 +2451,7 @@ function EditPost() {
       <header className="admin-title">
         <div>
           <p className="eyebrow">Refine the story</p>
-          <h1>Edit journey</h1>
+          <h1>Edit journal</h1>
           {post.isDraft && <span className="status-pill status-draft">Preview only</span>}
         </div>
         <div className="admin-title-actions">
@@ -2016,7 +2483,7 @@ function EditPost() {
           <div className="preview-strip editor-photo-strip">
             {post.images.map((image, index) => (
               <div className="photo-frame" key={image.id}>
-                <img src={image.url} alt={`Journey photo ${index + 1}`} />
+                <img src={image.url} alt={`Journal photo ${index + 1}`} />
                 {post.images.length > 1 && (
                   <button
                     type="button"
@@ -2045,8 +2512,10 @@ function EditPost() {
           <JourneyOrganizationFields
             tripId={tripId}
             chapterId={chapterId}
+            albumId={albumId}
             onTripIdChange={setTripId}
             onChapterIdChange={setChapterId}
+            onAlbumIdChange={setAlbumId}
           />
           <label>Place<input value={place} onChange={(e) => setPlace(e.target.value)} placeholder="Kyoto, Japan" /></label>
           <label>Date taken<input type="datetime-local" value={takenAt} onChange={(e) => setTakenAt(e.target.value)} /></label>
@@ -2081,6 +2550,7 @@ export default function App() {
           <Route path="/admin" element={<AdminDashboard />} />
           <Route path="/admin/new" element={<NewPost />} />
           <Route path="/admin/posts/:slug/edit" element={<EditPost />} />
+          <Route path="/admin/albums" element={<AdminAlbums />} />
           <Route path="/admin/profile" element={<ProfileEditor />} />
         </Route>
       </Route>

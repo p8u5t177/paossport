@@ -23,6 +23,7 @@ import {
   ensureMediaDirs,
   reconcileImageDimensions,
   saveImage,
+  uniqueAlbumSlug,
   uniqueChapterSlug,
   uniqueSlug,
   uniqueTripSlug,
@@ -116,7 +117,7 @@ function resolvePostOrganization(
   chapterRaw: unknown,
 ): { ok: true; tripId: string | null; chapterId: string | null } | { ok: false; error: string } {
   const chapterResolved = resolveChapterId(chapterRaw);
-  if (!chapterResolved.ok) return { ok: false, error: "Chapter not found" };
+  if (!chapterResolved.ok) return { ok: false, error: "Journey not found" };
   const tripResolved = resolveTripId(tripRaw);
   if (!tripResolved.ok) return { ok: false, error: "Trip not found" };
 
@@ -127,9 +128,9 @@ function resolvePostOrganization(
     const chapter = db
       .prepare("SELECT trip_id FROM chapter WHERE id = ?")
       .get(chapterId) as { trip_id: string } | undefined;
-    if (!chapter) return { ok: false, error: "Chapter not found" };
+    if (!chapter) return { ok: false, error: "Journey not found" };
     if (tripId && tripId !== chapter.trip_id) {
-      return { ok: false, error: "Chapter does not belong to that trip" };
+      return { ok: false, error: "Journey does not belong to that trip" };
     }
     tripId = chapter.trip_id;
   }
@@ -256,43 +257,127 @@ function listPreviewPosts(limit: number, cursor?: string) {
     .all(limit);
 }
 
-function listFeedTrips(includeDrafts: boolean) {
+function feedTripIdsWithPosts(includeDrafts: boolean): Set<string> {
   const draftClause = includeDrafts ? "1 = 1" : "p.is_draft = 0";
-  const trips = db
+  const rows = db
     .prepare(
-      `SELECT DISTINCT t.id, t.slug, t.title, t.sort_order
-       FROM trip t
-       WHERE t.id IN (
-         SELECT p.trip_id FROM post p WHERE p.trip_id = t.id AND ${draftClause}
+      `SELECT DISTINCT trip_id FROM (
+         SELECT p.trip_id AS trip_id FROM post p WHERE p.trip_id IS NOT NULL AND ${draftClause}
          UNION
-         SELECT c.trip_id FROM post p
+         SELECT c.trip_id AS trip_id FROM post p
          INNER JOIN chapter c ON c.id = p.chapter_id
          WHERE ${draftClause}
-       )
-       ORDER BY t.sort_order, t.title COLLATE NOCASE`,
+       )`,
     )
-    .all() as Array<{ id: string; slug: string; title: string; sort_order: number }>;
-  const chapterStmt = db.prepare(
-    `SELECT DISTINCT c.id, c.slug, c.title, c.sort_order
-     FROM chapter c
-     INNER JOIN post p ON p.chapter_id = c.id AND ${draftClause}
-     WHERE c.trip_id = ?
-     ORDER BY c.sort_order, c.title COLLATE NOCASE`,
-  );
+    .all() as Array<{ trip_id: string }>;
+  return new Set(rows.map((row) => row.trip_id));
+}
+
+function mapFeedTrip(tripId: string, includeDrafts: boolean) {
+  const trip = db
+    .prepare(`SELECT id, slug, title FROM trip WHERE id = ?`)
+    .get(tripId) as { id: string; slug: string; title: string } | undefined;
+  if (!trip) return undefined;
+  const draftClause = includeDrafts ? "1 = 1" : "p.is_draft = 0";
+  const chapters = db
+    .prepare(
+      `SELECT DISTINCT c.id, c.slug, c.title, c.sort_order
+       FROM chapter c
+       INNER JOIN post p ON p.chapter_id = c.id AND ${draftClause}
+       WHERE c.trip_id = ?
+       ORDER BY c.sort_order, c.title COLLATE NOCASE`,
+    )
+    .all(tripId) as Array<{ id: string; slug: string; title: string; sort_order: number }>;
   return {
-    trips: trips.map((trip) => ({
-      id: trip.id,
-      slug: trip.slug,
-      title: trip.title,
-      chapters: (
-        chapterStmt.all(trip.id) as Array<{ id: string; slug: string; title: string; sort_order: number }>
-      ).map((chapter) => ({
-        id: chapter.id,
-        slug: chapter.slug,
-        title: chapter.title,
-      })),
+    id: trip.id,
+    slug: trip.slug,
+    title: trip.title,
+    chapters: chapters.map((chapter) => ({
+      id: chapter.id,
+      slug: chapter.slug,
+      title: chapter.title,
     })),
   };
+}
+
+function tripAlbumId(tripId: string): string | null {
+  const row = db.prepare(`SELECT album_id FROM album_trip WHERE trip_id = ?`).get(tripId) as
+    | { album_id: string }
+    | undefined;
+  return row?.album_id ?? null;
+}
+
+function setTripAlbum(tripId: string, albumId: string | null) {
+  db.prepare(`DELETE FROM album_trip WHERE trip_id = ?`).run(tripId);
+  if (!albumId) return;
+  const album = db.prepare(`SELECT id FROM album WHERE id = ?`).get(albumId);
+  if (!album) return;
+  const sortOrder =
+    (
+      db
+        .prepare(`SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM album_trip WHERE album_id = ?`)
+        .get(albumId) as { next_order: number }
+    ).next_order ?? 0;
+  db.prepare(`INSERT INTO album_trip (album_id, trip_id, sort_order) VALUES (?, ?, ?)`).run(
+    albumId,
+    tripId,
+    sortOrder,
+  );
+}
+
+function listFeedTrips(includeDrafts: boolean) {
+  const tripIds = feedTripIdsWithPosts(includeDrafts);
+  const albums = db
+    .prepare(
+      `SELECT id, slug, title, sort_order, is_featured FROM album ORDER BY sort_order, title COLLATE NOCASE`,
+    )
+    .all() as Array<{ id: string; slug: string; title: string; sort_order: number; is_featured: number }>;
+
+  const albumTripsStmt = db.prepare(
+    `SELECT t.id AS trip_id, at.album_id, at.sort_order
+     FROM album_trip at
+     INNER JOIN trip t ON t.id = at.trip_id
+     WHERE at.album_id = ?
+     ORDER BY at.sort_order, t.title COLLATE NOCASE`,
+  );
+
+  const feedAlbums = albums
+    .map((album) => {
+      const members = (
+        albumTripsStmt.all(album.id) as Array<{ trip_id: string; album_id: string; sort_order: number }>
+      )
+        .filter((member) => tripIds.has(member.trip_id))
+        .map((member) => mapFeedTrip(member.trip_id, includeDrafts))
+        .filter((trip): trip is NonNullable<typeof trip> => Boolean(trip));
+      if (members.length === 0) return null;
+      return {
+        id: album.id,
+        slug: album.slug,
+        title: album.title,
+        featured: Boolean(album.is_featured),
+        trips: members,
+      };
+    })
+    .filter((album): album is NonNullable<typeof album> => Boolean(album));
+
+  const flatTrips = [...tripIds]
+    .map((id) => {
+      const row = db
+        .prepare(`SELECT id, slug, title, sort_order FROM trip WHERE id = ?`)
+        .get(id) as { id: string; slug: string; title: string; sort_order: number } | undefined;
+      if (!row) return undefined;
+      const mapped = mapFeedTrip(row.id, includeDrafts);
+      if (!mapped) return undefined;
+      return { sortOrder: row.sort_order, trip: mapped };
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry))
+    .sort((a, b) => {
+      if (a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder;
+      return a.trip.title.localeCompare(b.trip.title, undefined, { sensitivity: "base" });
+    })
+    .map((entry) => entry.trip);
+
+  return { albums: feedAlbums, trips: flatTrips };
 }
 
 app.get("/api/trips", (_req, res) => {
@@ -400,6 +485,7 @@ app.get("/api/admin/trips", admin, (_req, res) => {
       id: trip.id,
       slug: trip.slug,
       title: trip.title,
+      albumId: tripAlbumId(trip.id),
       chapters: chapters
         .filter((chapter) => chapter.trip_id === trip.id)
         .map((chapter) => ({
@@ -418,12 +504,111 @@ app.post("/api/admin/trips", admin, (req, res) => {
     res.status(400).json({ error: "Trip title required" });
     return;
   }
+  const albumRaw = req.body.albumId;
+  const albumId =
+    albumRaw === undefined || albumRaw === null || albumRaw === "" ? null : String(albumRaw).trim();
+  if (albumId && !db.prepare("SELECT id FROM album WHERE id = ?").get(albumId)) {
+    res.status(400).json({ error: "Collection not found" });
+    return;
+  }
   const id = uuid();
   const slug = uniqueTripSlug(db, title);
   db.prepare(
     `INSERT INTO trip (id, slug, title, sort_order) VALUES (?, ?, ?, COALESCE((SELECT MAX(sort_order) + 1 FROM trip), 0))`,
   ).run(id, slug, title);
-  res.status(201).json({ id, slug, title, chapters: [] });
+  if (albumId) setTripAlbum(id, albumId);
+  res.status(201).json({ id, slug, title, albumId: albumId ?? undefined, chapters: [] });
+});
+
+app.patch("/api/admin/trips/:tripId", admin, (req, res) => {
+  const tripId = String(req.params.tripId ?? "");
+  const trip = db.prepare("SELECT id, slug, title FROM trip WHERE id = ?").get(tripId) as
+    | { id: string; slug: string; title: string }
+    | undefined;
+  if (!trip) {
+    res.status(404).json({ error: "Trip not found" });
+    return;
+  }
+  if (req.body.albumId === undefined) {
+    res.status(400).json({ error: "albumId required" });
+    return;
+  }
+  const albumRaw = req.body.albumId;
+  const albumId =
+    albumRaw === null || albumRaw === "" ? null : String(albumRaw).trim();
+  if (albumId && !db.prepare("SELECT id FROM album WHERE id = ?").get(albumId)) {
+    res.status(400).json({ error: "Collection not found" });
+    return;
+  }
+  setTripAlbum(tripId, albumId);
+  res.json({ id: trip.id, slug: trip.slug, title: trip.title, albumId });
+});
+
+app.get("/api/admin/albums", admin, (_req, res) => {
+  const albums = db
+    .prepare(
+      `SELECT id, slug, title, sort_order, is_featured FROM album ORDER BY sort_order, title COLLATE NOCASE`,
+    )
+    .all() as Array<{ id: string; slug: string; title: string; sort_order: number; is_featured: number }>;
+  const tripCounts = db.prepare(
+    `SELECT album_id, COUNT(*) AS count FROM album_trip GROUP BY album_id`,
+  ).all() as Array<{ album_id: string; count: number }>;
+  const countByAlbum = new Map(tripCounts.map((row) => [row.album_id, row.count]));
+  res.json({
+    albums: albums.map((album) => ({
+      id: album.id,
+      slug: album.slug,
+      title: album.title,
+      tripCount: countByAlbum.get(album.id) ?? 0,
+      featured: Boolean(album.is_featured),
+    })),
+  });
+});
+
+app.post("/api/admin/albums", admin, (req, res) => {
+  const title = String(req.body.title ?? "").trim();
+  if (!title) {
+    res.status(400).json({ error: "Collection title required" });
+    return;
+  }
+  const id = uuid();
+  const slug = uniqueAlbumSlug(db, title);
+  db.prepare(
+    `INSERT INTO album (id, slug, title, sort_order) VALUES (?, ?, ?, COALESCE((SELECT MAX(sort_order) + 1 FROM album), 0))`,
+  ).run(id, slug, title);
+  res.status(201).json({ id, slug, title, tripCount: 0, featured: false });
+});
+
+app.patch("/api/admin/albums/:albumId", admin, (req, res) => {
+  const albumId = String(req.params.albumId ?? "");
+  const album = db.prepare("SELECT id, slug, title FROM album WHERE id = ?").get(albumId) as
+    | { id: string; slug: string; title: string }
+    | undefined;
+  if (!album) {
+    res.status(404).json({ error: "Collection not found" });
+    return;
+  }
+  if (req.body.featured === undefined) {
+    res.status(400).json({ error: "featured required" });
+    return;
+  }
+  const featured = Boolean(req.body.featured);
+  if (featured) {
+    db.prepare(`UPDATE album SET is_featured = 0`).run();
+    db.prepare(`UPDATE album SET is_featured = 1, updated_at = datetime('now') WHERE id = ?`).run(albumId);
+  } else {
+    db.prepare(`UPDATE album SET is_featured = 0, updated_at = datetime('now') WHERE id = ?`).run(albumId);
+  }
+  const tripCountRow = db
+    .prepare(`SELECT COUNT(*) AS count FROM album_trip WHERE album_id = ?`)
+    .get(albumId) as { count: number };
+  res.json({
+    id: album.id,
+    slug: album.slug,
+    title: album.title,
+    tripCount: tripCountRow.count,
+    featured,
+  });
 });
 
 app.post("/api/admin/chapters", admin, (req, res) => {
@@ -434,7 +619,7 @@ app.post("/api/admin/chapters", admin, (req, res) => {
     return;
   }
   if (!title) {
-    res.status(400).json({ error: "Chapter title required" });
+    res.status(400).json({ error: "Journey title required" });
     return;
   }
   const trip = db.prepare("SELECT id FROM trip WHERE id = ?").get(tripId);
@@ -679,7 +864,7 @@ app.post("/api/posts/:id/images", admin, upload.array("images", 10), async (req,
     res.json(mapPost(updated as Parameters<typeof mapPost>[0]));
   } catch (e) {
     if (e instanceof Error && e.message === "TOO_MANY_IMAGES") {
-      res.status(400).json({ error: "A journey can have at most 10 photos" });
+      res.status(400).json({ error: "A journal can have at most 10 photos" });
       return;
     }
     console.error(e);
@@ -699,7 +884,7 @@ app.delete("/api/post-images/:id", admin, (req, res) => {
     db.prepare("SELECT COUNT(*) as count FROM post_image WHERE post_id = ?").get(row.post_id) as { count: number }
   ).count;
   if (count <= 1) {
-    res.status(400).json({ error: "Keep at least one photo on the journey" });
+    res.status(400).json({ error: "Keep at least one photo on the journal" });
     return;
   }
   deleteImageByUrl(row.public_url);

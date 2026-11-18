@@ -124,6 +124,16 @@ export function uniqueTripSlug(db: import("better-sqlite3").Database, base: stri
   return slug;
 }
 
+export function uniqueAlbumSlug(db: import("better-sqlite3").Database, base: string): string {
+  let slug = slugify(base === "" ? "album" : base);
+  let n = 0;
+  while (db.prepare("SELECT 1 FROM album WHERE slug = ?").get(slug)) {
+    n += 1;
+    slug = `${slugify(base)}-${n}`;
+  }
+  return slug;
+}
+
 export function uniqueChapterSlug(
   db: import("better-sqlite3").Database,
   tripId: string,

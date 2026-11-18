@@ -78,6 +78,24 @@ export function getDb() {
       UNIQUE(trip_id, slug)
     );
 
+    CREATE TABLE IF NOT EXISTS album (
+      id TEXT PRIMARY KEY,
+      slug TEXT NOT NULL UNIQUE,
+      title TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS album_trip (
+      album_id TEXT NOT NULL REFERENCES album(id) ON DELETE CASCADE,
+      trip_id TEXT NOT NULL REFERENCES trip(id) ON DELETE CASCADE,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (album_id, trip_id)
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS album_trip_trip_id ON album_trip(trip_id);
+
     INSERT OR IGNORE INTO profile (id, display_name, username, bio)
     VALUES (1, 'Alex Rivera', 'alexr', 'Muted maps and loud sunsets. A travel journal without the noise.');
   `);
@@ -125,6 +143,12 @@ export function getDb() {
   }
   if (!imageColNames.has("fit_mode")) {
     db.exec(`ALTER TABLE post_image ADD COLUMN fit_mode TEXT NOT NULL DEFAULT 'cover'`);
+  }
+
+  const albumCols = db.prepare("PRAGMA table_info(album)").all() as { name: string }[];
+  const albumColNames = new Set(albumCols.map((col) => col.name));
+  if (!albumColNames.has("is_featured")) {
+    db.exec(`ALTER TABLE album ADD COLUMN is_featured INTEGER NOT NULL DEFAULT 0`);
   }
 
   return db;

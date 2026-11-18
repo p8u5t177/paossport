@@ -166,6 +166,8 @@ const formatDate = (value: string) =>
     new Date(value),
   );
 
+const datetimeLocalNow = () => new Date().toISOString().slice(0, 16);
+
 function storyShortTitle(post: Post) {
   if (post.location?.name) {
     const primary = post.location.name.split(",")[0]?.trim();
@@ -422,7 +424,7 @@ function avatarInitial(displayName: string) {
 
 function ProfileDisplayName({ displayName, hero = false }: { displayName: string; hero?: boolean }) {
   if (isPaoOfflineBrand(displayName)) {
-    return <BrandName casing="title" />;
+    return <BrandName hero={hero} />;
   }
   const parsed = parseDomainDisplayName(displayName);
   if (parsed) {
@@ -452,12 +454,35 @@ function ProfileDisplayName({ displayName, hero = false }: { displayName: string
   return <>{displayNameLead(displayName)}</>;
 }
 
-function BrandName({ casing = "lower", className }: { casing?: "lower" | "title"; className?: string }) {
-  const label = casing === "title" ? "Pao.offline" : "pao.offline";
-  const classes = ["brand-name", className].filter(Boolean).join(" ");
+function profileBioLines(bio: string) {
+  const trimmed = bio.trim();
+  if (!trimmed) return [];
+  const byNewline = trimmed.split(/\n+/).map((line) => line.trim()).filter(Boolean);
+  if (byNewline.length > 1) return byNewline;
+  const sentences = trimmed.match(/[^.!?]+[.!?]+/g)?.map((line) => line.trim()).filter(Boolean);
+  if (sentences && sentences.length > 1) return sentences;
+  return [trimmed];
+}
+
+function ProfileBio({ bio }: { bio: string }) {
+  const lines = profileBioLines(bio);
+  if (lines.length === 0) return null;
+  return (
+    <div className="bio">
+      {lines.map((line) => (
+        <p key={line}>{line}</p>
+      ))}
+    </div>
+  );
+}
+
+function BrandName({ hero = false, className }: { hero?: boolean; className?: string }) {
+  const classes = ["brand-name", hero ? "brand-name-hero" : "", className].filter(Boolean).join(" ");
   return (
     <span className={classes} aria-label="pao.offline">
-      {label}
+      <span className="brand-name-pao">pao</span>
+      <span className="brand-name-dot">.</span>
+      <span className="brand-name-offline">offline</span>
     </span>
   );
 }
@@ -891,20 +916,21 @@ function PostCard({ post, profile, site }: { post: Post; profile: Profile; site:
       <header className="post-header">
         <Avatar profile={profile} />
         <div>
-          <strong>@{profile.username}</strong>
-          {post.location?.name && <span>{post.location.name}</span>}
-          {grouping && <span className="journey-grouping">{grouping}</span>}
+          <strong>{profile.username}</strong>
+          {post.location?.name && <span className="post-header-place">{post.location.name}</span>}
         </div>
-        <time>{formatDate(post.takenAt)}</time>
+        <div className="post-header-aside">
+          {grouping && <span className="journey-grouping">{grouping}</span>}
+          <time>{formatDate(post.takenAt)}</time>
+        </div>
       </header>
       {post.isDraft && <p className="draft-pill">Draft — not on live site</p>}
       <Carousel images={post.images} linkedSlug={post.slug} postBase={site.postBase} />
       <div className="post-copy">
-        {grouping && <p className="journey-grouping-line">{grouping}</p>}
-        {post.location?.name && (
-          <div className="location-line"><Icon name="pin" size={16} />{post.location.name}</div>
-        )}
-        <p><strong>@{profile.username}</strong> {post.caption}</p>
+        <div className="post-copy-text">
+          <strong>{profile.username}</strong>
+          {post.caption.trim() && <p>{post.caption}</p>}
+        </div>
         <Link className="quiet-link" to={`${site.postBase}/${post.slug}`}>View journey</Link>
       </div>
     </article>
@@ -1042,18 +1068,14 @@ function JournalFeed({ site }: { site: SiteMode }) {
           <h1>
             <ProfileDisplayName displayName={profile.displayName} hero />
           </h1>
-          {(profile.tagline || profile.currentLocation?.name) && (
-            <div className="profile-meta">
-              {profile.tagline && <p className="profile-status">{profile.tagline}</p>}
-              {profile.currentLocation?.name && (
-                <p className="current-location" aria-live="polite">
-                  <Icon name="pin" size={16} />
-                  {profile.currentLocation.name}
-                </p>
-              )}
-            </div>
-          )}
-          {profile.bio && <p className="bio">{profile.bio}</p>}
+          {profile.tagline ? <p className="profile-status">{profile.tagline}</p> : null}
+          {profile.currentLocation?.name ? (
+            <p className="current-location" aria-live="polite">
+              <Icon name="pin" size={15} />
+              {profile.currentLocation.name}
+            </p>
+          ) : null}
+          {profile.bio ? <ProfileBio bio={profile.bio} /> : null}
           {tripBrowse && selectedTripId && activeTrip ? (
             <div className="trip-feed-controls">
               <TripSelector
@@ -1460,7 +1482,12 @@ function AdminLayout() {
     <div className="admin-shell">
       <aside className="admin-sidebar">
         <Link to="/admin" className="wordmark"><span>P</span><BrandName /></Link>
-        <nav><Link to="/admin">Posts</Link><Link to="/admin/new">New journey</Link><Link to="/admin/profile">Profile</Link></nav>
+        <nav>
+          <Link to="/admin">Posts</Link>
+          <Link to="/admin/new">New journey</Link>
+          <Link to="/admin/profile">Profile</Link>
+          <a href="/" target="_blank" rel="noreferrer">Main site</a>
+        </nav>
         <button onClick={async () => { await api("/api/auth/logout", { method: "POST" }); navigate("/"); }}>Sign out</button>
       </aside>
       <div className="admin-mobile-nav"><Link to="/admin" className="wordmark"><span>P</span><BrandName /></Link><Link to="/admin/new" className="circle-button"><Icon name="plus" /></Link></div>
@@ -1536,6 +1563,7 @@ function NewPost() {
   const [caption, setCaption] = useState("");
   const [place, setPlace] = useState("");
   const [takenAt, setTakenAt] = useState("");
+  const [publishedAt, setPublishedAt] = useState(datetimeLocalNow);
   const [lat, setLat] = useState("");
   const [lng, setLng] = useState("");
   const [locating, setLocating] = useState(false);
@@ -1601,6 +1629,7 @@ function NewPost() {
     data.append("caption", caption);
     data.append("placeName", place);
     if (takenAt) data.append("takenAt", new Date(takenAt).toISOString());
+    data.append("publishedAt", new Date(publishedAt).toISOString());
     if (lat) data.append("lat", lat);
     if (lng) data.append("lng", lng);
     data.append("tripId", tripId);
@@ -1655,6 +1684,7 @@ function NewPost() {
           />
           <label>Place<input value={place} onChange={(e) => setPlace(e.target.value)} placeholder="Kyoto, Japan" /></label>
           <label>Date taken <span className="optional">Optional</span><input type="datetime-local" value={takenAt} onChange={(e) => setTakenAt(e.target.value)} /></label>
+          <label>Date posted<input type="datetime-local" value={publishedAt} onChange={(e) => setPublishedAt(e.target.value)} /></label>
           <label>Story<textarea value={caption} onChange={(e) => setCaption(e.target.value)} placeholder="What made this moment worth keeping?" rows={6} /></label>
           <div className="coordinates"><label>Latitude<input inputMode="decimal" value={lat} onChange={(e) => setLat(e.target.value)} placeholder="35.0116" /></label><label>Longitude<input inputMode="decimal" value={lng} onChange={(e) => setLng(e.target.value)} placeholder="135.7681" /></label></div>
           <button className="primary-button location-detect-button" type="button" disabled={locating} onClick={useMyLocation}>
@@ -1748,6 +1778,7 @@ function EditPost() {
   const [lat, setLat] = useState("");
   const [lng, setLng] = useState("");
   const [takenAt, setTakenAt] = useState("");
+  const [publishedAt, setPublishedAt] = useState(datetimeLocalNow);
   const [caption, setCaption] = useState("");
   const [error, setError] = useState("");
   const [locating, setLocating] = useState(false);
@@ -1768,6 +1799,7 @@ function EditPost() {
         setChapterId(loaded.chapter?.id ?? "");
         setTripId(loaded.trip?.id ?? loaded.chapter?.trip.id ?? "");
         setTakenAt(new Date(loaded.takenAt).toISOString().slice(0, 16));
+        setPublishedAt(new Date(loaded.publishedAt).toISOString().slice(0, 16));
         const nextLat = loaded.location?.lat;
         const nextLng = loaded.location?.lng;
         let nextPlace = loaded.location?.name ?? "";
@@ -1823,6 +1855,7 @@ function EditPost() {
           placeName: place,
           caption,
           takenAt: new Date(takenAt).toISOString(),
+          publishedAt: new Date(publishedAt).toISOString(),
           lat: lat ? Number(lat) : null,
           lng: lng ? Number(lng) : null,
           tripId: tripId || null,
@@ -2017,6 +2050,7 @@ function EditPost() {
           />
           <label>Place<input value={place} onChange={(e) => setPlace(e.target.value)} placeholder="Kyoto, Japan" /></label>
           <label>Date taken<input type="datetime-local" value={takenAt} onChange={(e) => setTakenAt(e.target.value)} /></label>
+          <label>Date posted<input type="datetime-local" value={publishedAt} onChange={(e) => setPublishedAt(e.target.value)} /></label>
           <label>Story<textarea value={caption} onChange={(e) => setCaption(e.target.value)} rows={7} /></label>
           <div className="coordinates">
             <label>Latitude<input inputMode="decimal" value={lat} onChange={(e) => setLat(e.target.value)} placeholder="35.0116" /></label>

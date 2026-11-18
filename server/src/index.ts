@@ -504,9 +504,11 @@ app.post("/api/posts", admin, upload.array("images", 10), async (req, res) => {
     const caption = String(req.body.caption ?? "");
     const placeName = req.body.placeName ? String(req.body.placeName) : null;
     const requestedTakenAt = req.body.takenAt ? String(req.body.takenAt) : undefined;
+    const requestedPublishedAt = req.body.publishedAt ? String(req.body.publishedAt) : undefined;
     const requestedLat = req.body.lat ? Number(req.body.lat) : undefined;
     const requestedLng = req.body.lng ? Number(req.body.lng) : undefined;
     const takenAt = requestedTakenAt ?? new Date().toISOString();
+    const publishedAt = requestedPublishedAt ?? new Date().toISOString();
     const slugBase = req.body.slug ? String(req.body.slug) : placeName ?? takenAt;
     const slug = uniqueSlug(db, slugBase);
     const postId = uuid();
@@ -533,7 +535,7 @@ app.post("/api/posts", admin, upload.array("images", 10), async (req, res) => {
 
     db.prepare(
       `INSERT INTO post (id, slug, caption, taken_at, place_name, lat, lng, trip_id, chapter_id, is_draft, published_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'))`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
     ).run(
       postId,
       slug,
@@ -544,6 +546,7 @@ app.post("/api/posts", admin, upload.array("images", 10), async (req, res) => {
       metaLng,
       organization.tripId,
       organization.chapterId,
+      publishedAt,
     );
 
     const insertImg = db.prepare(
@@ -595,9 +598,7 @@ app.post("/api/posts/:id/publish", admin, (req, res) => {
     return;
   }
   if ((existing as { is_draft?: number }).is_draft) {
-    db.prepare(`UPDATE post SET is_draft = 0, published_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`).run(
-      req.params.id,
-    );
+    db.prepare(`UPDATE post SET is_draft = 0, updated_at = datetime('now') WHERE id = ?`).run(req.params.id);
   }
   const updated = db.prepare("SELECT * FROM post WHERE id = ?").get(req.params.id);
   res.json(mapPost(updated as Parameters<typeof mapPost>[0]));
@@ -725,6 +726,7 @@ app.patch("/api/posts/:id", admin, (req, res) => {
     caption?: string;
     placeName?: string;
     takenAt?: string;
+    publishedAt?: string;
     lat?: number | null;
     lng?: number | null;
     chapterId?: string | null;
@@ -733,6 +735,7 @@ app.patch("/api/posts/:id", admin, (req, res) => {
   const caption = body.caption ?? existing.caption;
   const placeName = body.placeName ?? existing.place_name;
   const takenAt = body.takenAt ?? existing.taken_at;
+  const publishedAt = body.publishedAt ?? existing.published_at;
   const lat = body.lat === undefined ? existing.lat : body.lat;
   const lng = body.lng === undefined ? existing.lng : body.lng;
 
@@ -747,12 +750,13 @@ app.patch("/api/posts/:id", admin, (req, res) => {
 
   db.prepare(
     `UPDATE post
-     SET caption = ?, place_name = ?, taken_at = ?, lat = ?, lng = ?, trip_id = ?, chapter_id = ?, updated_at = datetime('now')
+     SET caption = ?, place_name = ?, taken_at = ?, published_at = ?, lat = ?, lng = ?, trip_id = ?, chapter_id = ?, updated_at = datetime('now')
      WHERE id = ?`,
   ).run(
     caption,
     placeName,
     takenAt,
+    publishedAt,
     lat,
     lng,
     organization.tripId,

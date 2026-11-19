@@ -682,7 +682,7 @@ function Icon({
   name,
   size = 20,
 }: {
-  name: "pin" | "mapPin" | "grid" | "arrow" | "share" | "plus" | "x" | "journey" | "layers" | "plane" | "globe";
+  name: "pin" | "mapPin" | "grid" | "arrow" | "share" | "plus" | "menu" | "x" | "journey" | "layers" | "plane" | "globe";
   size?: number;
 }) {
   const paths = {
@@ -715,6 +715,7 @@ function Icon({
     arrow: <path d="m15 18-6-6 6-6" />,
     share: <path d="M12 16V3m0 0L7 8m5-5 5 5M5 13v7h14v-7" />,
     plus: <path d="M12 5v14M5 12h14" />,
+    menu: <path d="M4 7h16M4 12h16M4 17h16" />,
     x: <path d="m6 6 12 12M18 6 6 18" />,
   };
   return (
@@ -1830,22 +1831,114 @@ function JourneyOrganizationFields({
   );
 }
 
+function AdminNavLinks({ onNavigate }: { onNavigate?: () => void }) {
+  return (
+    <>
+      <Link to="/admin" onClick={onNavigate}>
+        Journals
+      </Link>
+      <Link to="/admin/new" onClick={onNavigate}>
+        New journal
+      </Link>
+      <Link to="/admin/albums" onClick={onNavigate}>
+        Collections
+      </Link>
+      <Link to="/admin/profile" onClick={onNavigate}>
+        Profile
+      </Link>
+      <a href="/" target="_blank" rel="noreferrer" onClick={onNavigate}>
+        Main site
+      </a>
+    </>
+  );
+}
+
 function AdminLayout() {
   const navigate = useNavigate();
+  const location = useLocation();
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  useEffect(() => {
+    setMenuOpen(false);
+  }, [location.pathname]);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [menuOpen]);
+
+  const closeMenu = () => setMenuOpen(false);
+  const signOut = async () => {
+    closeMenu();
+    await api("/api/auth/logout", { method: "POST" });
+    navigate("/");
+  };
+
   return (
-    <div className="admin-shell">
+    <div className={`admin-shell${menuOpen ? " admin-menu-open" : ""}`}>
       <aside className="admin-sidebar">
-        <Link to="/admin" className="wordmark"><span>P</span><BrandName /></Link>
+        <Link to="/admin" className="wordmark">
+          <span>P</span>
+          <BrandName />
+        </Link>
         <nav>
-          <Link to="/admin">Journals</Link>
-          <Link to="/admin/new">New journal</Link>
-          <Link to="/admin/albums">Collections</Link>
-          <Link to="/admin/profile">Profile</Link>
-          <a href="/" target="_blank" rel="noreferrer">Main site</a>
+          <AdminNavLinks />
         </nav>
-        <button onClick={async () => { await api("/api/auth/logout", { method: "POST" }); navigate("/"); }}>Sign out</button>
+        <button type="button" onClick={() => void signOut()}>
+          Sign out
+        </button>
       </aside>
-      <div className="admin-mobile-nav"><Link to="/admin" className="wordmark"><span>P</span><BrandName /></Link><Link to="/admin/new" className="circle-button"><Icon name="plus" /></Link></div>
+      <div className="admin-mobile-drawer" aria-hidden={!menuOpen}>
+        <button
+          type="button"
+          className="admin-drawer-backdrop"
+          aria-label="Close menu"
+          onClick={closeMenu}
+          tabIndex={menuOpen ? 0 : -1}
+        />
+        <aside
+          id="admin-mobile-drawer"
+          className="admin-drawer-panel"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Admin menu"
+          aria-hidden={!menuOpen}
+        >
+          <Link to="/admin" className="wordmark" onClick={closeMenu}>
+            <span>P</span>
+            <BrandName />
+          </Link>
+          <nav>
+            <AdminNavLinks onNavigate={closeMenu} />
+          </nav>
+          <button type="button" onClick={() => void signOut()}>
+            Sign out
+          </button>
+        </aside>
+      </div>
+      <div className="admin-mobile-nav">
+        <button
+          type="button"
+          className="admin-menu-button"
+          aria-expanded={menuOpen}
+          aria-controls="admin-mobile-drawer"
+          aria-label={menuOpen ? "Close menu" : "Open menu"}
+          onClick={() => setMenuOpen((open) => !open)}
+        >
+          <Icon name={menuOpen ? "x" : "menu"} size={22} />
+        </button>
+        <Link to="/admin" className="wordmark">
+          <span>P</span>
+          <BrandName />
+        </Link>
+        <Link to="/admin/new" className="circle-button" aria-label="New journal">
+          <Icon name="plus" />
+        </Link>
+      </div>
       <Outlet />
     </div>
   );

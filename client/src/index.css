@@ -41,7 +41,11 @@ h1, h2 { font-family: var(--serif); font-weight: 500; letter-spacing: -.035em; }
 .icon { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 
 .page-shell { width: 100%; max-width: 720px; min-height: 100svh; margin: 0 auto; }
-.feed-page { padding-bottom: 64px; }
+.feed-page {
+  padding-left: max(16px, env(safe-area-inset-left));
+  padding-right: max(16px, env(safe-area-inset-right));
+  padding-bottom: 64px;
+}
 .profile-hero { width: 100%; max-width: 720px; margin: 0 auto; padding: max(28px, env(safe-area-inset-top)) 20px 20px; text-align: center; }
 .profile-masthead { display: flex; flex-direction: column; align-items: center; gap: 6px; }
 .profile-masthead .avatar-large {
@@ -259,7 +263,7 @@ h1, h2 { font-family: var(--serif); font-weight: 500; letter-spacing: -.035em; }
   gap: 10px;
   max-width: 720px;
   margin: 0 auto;
-  padding: 10px 20px 2px;
+  padding: 10px 0 2px;
   width: 100%;
 }
 .feed-rule { gap: 10px; }
@@ -267,7 +271,7 @@ h1, h2 { font-family: var(--serif); font-weight: 500; letter-spacing: -.035em; }
 .feed-list-grouped { gap: 36px; }
 .feed-list-nested { padding-top: 0; gap: 28px; }
 .feed-chapter-block { display: grid; gap: 12px; }
-.feed-chapter-heading { display: flex; flex-direction: column; gap: 4px; padding: 0 20px; }
+.feed-chapter-heading { display: flex; flex-direction: column; gap: 4px; padding: 0; }
 .feed-chapter-heading h2 { font-family: var(--serif); font-size: 1.12rem; font-weight: 500; }
 .feed-chapter-heading p { color: var(--ink-soft); font-size: .72rem; font-weight: 600; }
 .profile-status { color: var(--ink-soft); font-size: .72rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
@@ -284,9 +288,26 @@ h1, h2 { font-family: var(--serif); font-weight: 500; letter-spacing: -.035em; }
 .avatar { width: 36px; height: 36px; flex: 0 0 auto; overflow: hidden; border: 2px solid var(--card); border-radius: 50%; outline: 1px solid var(--line); background: var(--moss); color: white; display: grid; place-items: center; font-family: var(--serif); }
 .avatar img { width: 100%; height: 100%; object-fit: cover; }
 .avatar-large { width: 82px; height: 82px; font-size: 2rem; outline: 2px solid var(--clay); outline-offset: 3px; }
-.feed-rule { display: flex; align-items: center; justify-content: space-between; border-block: 1px solid var(--line); padding: 12px 20px; color: var(--ink-soft); font-size: .7rem; letter-spacing: .12em; text-transform: uppercase; }
-.feed-list { display: grid; gap: 28px; padding-top: 20px; }
-.post-card { background: var(--card); border-block: 1px solid var(--line); }
+.feed-rule {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px;
+  color: var(--ink-soft);
+  font-size: .7rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  background: var(--card);
+}
+.feed-list { display: grid; gap: 20px; padding-top: 20px; }
+.post-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
 .post-header { display: grid; grid-template-columns: auto 1fr auto; align-items: start; gap: 11px; padding: 10px 14px; }
 .post-header > div { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; }
 .post-header strong { font-size: .78rem; }
@@ -355,7 +376,7 @@ h1, h2 { font-family: var(--serif); font-weight: 500; letter-spacing: -.035em; }
 .map-card iframe { display: block; width: 100%; height: 210px; border: 0; filter: saturate(.65) sepia(.08); }
 .map-card a { display: flex; justify-content: space-between; padding: 12px 14px; font-size: .75rem; font-weight: 700; }
 
-.state-card { margin: 48px 20px; padding: 34px 24px; border: 1px solid var(--line); border-radius: var(--radius); text-align: center; background: var(--card); }
+.state-card { margin: 48px 0; padding: 34px 24px; border: 1px solid var(--line); border-radius: var(--radius); text-align: center; background: var(--card); }
 .state-card h2 { font-size: 2rem; margin: 8px 0; }
 .state-card p:not(.eyebrow) { color: var(--ink-soft); line-height: 1.5; }
 .state-card button { margin-top: 16px; }
@@ -693,9 +714,13 @@ textarea { resize: vertical; line-height: 1.5; }
 .profile-avatar-edit label { flex: 1; }
 
 @media (min-width: 700px) {
-  .feed-page { padding: 0 28px 80px; }
+  .feed-page {
+    padding-left: max(28px, env(safe-area-inset-left));
+    padding-right: max(28px, env(safe-area-inset-right));
+    padding-bottom: 80px;
+  }
   .profile-hero { padding: max(28px, env(safe-area-inset-top)) 0 20px; }
-  .post-card { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+  .feed-list { gap: 28px; }
   .detail-layout { max-width: 1180px; margin: 42px auto 0; padding: 0 32px; display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(320px, .85fr); gap: 48px; align-items: start; }
   .detail-layout > .carousel { border-radius: var(--radius); }
   .detail-copy { position: sticky; top: 84px; padding: 18px 0; }

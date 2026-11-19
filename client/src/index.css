@@ -12,6 +12,7 @@
   --clay: #2f75b5;
   --sun: #d8a84e;
   --water: #4d8ba8;
+  --travel-live: #2f9e62;
   --radius: 20px;
   --serif: "Lora", "Iowan Old Style", Georgia, serif;
   --sans: "Manrope", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -60,6 +61,42 @@ h1, h2 { font-family: var(--serif); font-weight: 500; letter-spacing: -.035em; }
 .profile-masthead .profile-status { margin: 0; font-family: var(--sans); font-size: .62rem; font-weight: 600; letter-spacing: .16em; text-transform: uppercase; color: var(--ink-soft); }
 .profile-masthead .current-location { margin: 0; font-family: var(--serif); font-size: .92rem; font-weight: 500; color: var(--moss-dark); }
 .profile-masthead .current-location .icon { stroke: var(--moss-dark); }
+.profile-masthead .current-location-traveling .icon {
+  flex: 0 0 auto;
+  width: 1.08em;
+  height: 1.08em;
+  stroke-width: 1.35;
+  stroke: var(--travel-live);
+  stroke-linecap: round;
+  animation: travel-location-glow 2.2s ease-in-out infinite, travel-pin-bounce 2.5s ease-in-out infinite;
+  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--travel-live) 60%, transparent));
+}
+.current-location-traveling .travel-pin-dot {
+  fill: var(--travel-live);
+  stroke: none;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: travel-pin-dot-pulse 1.8s ease-in-out infinite;
+}
+@keyframes travel-pin-bounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-1px); }
+}
+@keyframes travel-pin-dot-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(0.55); opacity: 0.45; }
+}
+@keyframes travel-location-glow {
+  0%, 100% {
+    filter: drop-shadow(0 0 4px color-mix(in srgb, var(--travel-live) 50%, transparent))
+      drop-shadow(0 0 10px color-mix(in srgb, var(--travel-live) 22%, transparent));
+  }
+  50% {
+    filter: drop-shadow(0 0 7px color-mix(in srgb, var(--travel-live) 90%, transparent))
+      drop-shadow(0 0 18px color-mix(in srgb, var(--travel-live) 42%, transparent));
+  }
+}
+.current-location-traveling { gap: 7px; }
 .profile-masthead .bio {
   width: 100%;
   max-width: none;

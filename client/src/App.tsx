@@ -682,12 +682,34 @@ function Icon({
   name,
   size = 20,
 }: {
-  name: "pin" | "grid" | "arrow" | "share" | "plus" | "x" | "journey" | "layers";
+  name: "pin" | "mapPin" | "grid" | "arrow" | "share" | "plus" | "x" | "journey" | "layers" | "plane" | "globe";
   size?: number;
 }) {
   const paths = {
     pin: <path d="M12 21s7-6.2 7-13A7 7 0 1 0 5 8c0 6.8 7 13 7 13Zm0-10a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" />,
+    mapPin: (
+      <>
+        <path d="M12 21s7-6.2 7-13A7 7 0 1 0 5 8c0 6.8 7 13 7 13Z" />
+        <circle className="travel-pin-dot" cx="12" cy="8" r="3" />
+      </>
+    ),
     journey: <path d="M3 6.5 9 4.5l6 2 6-2v13l-6 2-6-2-6 2V6.5Z M9 4.5v13M15 6.5v13" />,
+    plane: (
+      <path d="M21 16v-2l-8-5V3.5a1.5 1.5 0 0 0-3 0V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z" />
+    ),
+    globe: (
+      <>
+        <circle cx="12" cy="12" r="10" />
+        <path d="M12 2v20" />
+        <path d="M2 12h20" />
+        <path d="M3.4 9Q12 5.6 20.6 9" />
+        <path d="M3.4 15Q12 18.4 20.6 15" />
+        <g className="travel-globe-spin">
+          <path d="M12 2C4.6 2 2.6 12 12 22" />
+          <path d="M12 2c7.4 0 9.4 10 0 20" />
+        </g>
+      </>
+    ),
     layers: <path d="M4 9.5 12 5l8 4.5-8 4.5-8-4.5Zm0 5.5 8 4.5 8-4.5M12 14v6" />,
     grid: <path d="M4 4h6v6H4V4Zm10 0h6v6h-6V4ZM4 14h6v6H4v-6Zm10 0h6v6h-6v-6Z" />,
     arrow: <path d="m15 18-6-6 6-6" />,
@@ -1305,9 +1327,13 @@ function JournalFeed({ site }: { site: SiteMode }) {
           </h1>
           {profile.tagline ? <p className="profile-status">{profile.tagline}</p> : null}
           {profile.currentLocation?.name ? (
-            <p className="current-location" aria-live="polite">
-              <Icon name="pin" size={15} />
-              {profile.currentLocation.name}
+            <p
+              className="current-location current-location-traveling"
+              aria-live="polite"
+              aria-label={`Currently traveling · ${profile.currentLocation.name}`}
+            >
+              <Icon name="mapPin" size={18} />
+              <span>{profile.currentLocation.name}</span>
             </p>
           ) : null}
           {profile.bio ? <ProfileBio bio={profile.bio} /> : null}

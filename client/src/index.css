@@ -646,7 +646,9 @@ textarea { resize: vertical; line-height: 1.5; }
   background: color-mix(in srgb, var(--water) 18%, var(--card));
   border-color: color-mix(in srgb, var(--water) 40%, var(--line));
 }
+.editor-carousel { touch-action: pan-y pinch-zoom; }
 .framing-frame-active { cursor: grab; touch-action: none; }
+.framing-frame-active.framing-frame-pan-x { touch-action: pan-x; }
 .framing-frame-dragging { cursor: grabbing; }
 .framing-hint {
   position: absolute;

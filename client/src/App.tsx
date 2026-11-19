@@ -88,6 +88,30 @@ function framingPanAxes(width?: number, height?: number) {
   return { x: false, y: false };
 }
 
+const EDITOR_REFRAME_DRAG_THRESHOLD_PX = 10;
+
+function editorSlideFramingGesture(
+  image: Image,
+  fit: "cover" | "contain",
+  imageCount: number,
+  hasFocusSave: boolean,
+) {
+  const axes = framingPanAxes(image.width, image.height);
+  const canReframe = hasFocusSave && fit === "cover" && (axes.x || axes.y);
+  if (!canReframe) {
+    return { axes, reframeGestures: false, allowCarouselDrag: true, deferCarouselDrag: false };
+  }
+  const landscapePanOnly = axes.x && !axes.y;
+  const portraitPanOnly = axes.y && !axes.x;
+  if (imageCount > 1 && (landscapePanOnly || (axes.x && axes.y))) {
+    return { axes, reframeGestures: false, allowCarouselDrag: true, deferCarouselDrag: false };
+  }
+  if (portraitPanOnly) {
+    return { axes, reframeGestures: true, allowCarouselDrag: true, deferCarouselDrag: true };
+  }
+  return { axes, reframeGestures: true, allowCarouselDrag: false, deferCarouselDrag: false };
+}
+
 type PhotoMetadataFlags = { hasLocation: boolean; hasDate: boolean };
 
 type FileExif = PhotoMetadataFlags & { lat?: number; lng?: number; takenAt?: string };
@@ -832,7 +856,11 @@ function EditorImageCarousel({
   onFitChange?: (imageId: string, fit: "cover" | "contain") => Promise<void>;
   framingBusy?: boolean;
 }) {
-  const [emblaRef, embla] = useEmblaCarousel({ loop: images.length > 1, watchDrag: false });
+  const allowCarouselDragRef = useRef(true);
+  const [emblaRef, embla] = useEmblaCarousel({
+    loop: images.length > 1,
+    watchDrag: () => allowCarouselDragRef.current,
+  });
   const [selected, setSelected] = useState(0);
   const [focusById, setFocusById] = useState<Record<string, FocusPoint>>({});
   const [fitById, setFitById] = useState<Record<string, "cover" | "contain">>({});
@@ -847,6 +875,9 @@ function EditorImageCarousel({
         width: number;
         height: number;
         axes: { x: boolean; y: boolean };
+        started: boolean;
+        deferCarouselDrag: boolean;
+        pointerId: number;
       }
     | null
   >(null);
@@ -892,8 +923,35 @@ function EditorImageCarousel({
 
   const active = images[selected];
   const activeFit = active ? resolveFit(active) : "cover";
-  const activeAxes = active ? framingPanAxes(active.width, active.height) : { x: false, y: false };
-  const canReframe = Boolean(active && activeFit === "cover" && (activeAxes.x || activeAxes.y));
+  const activeGesture = active
+    ? editorSlideFramingGesture(active, activeFit, images.length, Boolean(onFocusSave))
+    : null;
+  const canReframe = Boolean(activeGesture?.reframeGestures);
+  allowCarouselDragRef.current = activeGesture?.allowCarouselDrag ?? true;
+
+  const beginReframeDrag = (
+    event: React.PointerEvent<HTMLDivElement>,
+    image: Image,
+    focus: FocusPoint,
+    axes: { x: boolean; y: boolean },
+    deferCarouselDrag: boolean,
+  ) => {
+    if (!deferCarouselDrag) event.currentTarget.setPointerCapture(event.pointerId);
+    dragRef.current = {
+      id: image.id,
+      startX: event.clientX,
+      startY: event.clientY,
+      focusX: focus.x,
+      focusY: focus.y,
+      width: event.currentTarget.clientWidth,
+      height: event.currentTarget.clientHeight,
+      axes,
+      started: !deferCarouselDrag,
+      deferCarouselDrag,
+      pointerId: event.pointerId,
+    };
+    setDragging(!deferCarouselDrag);
+  };
 
   return (
     <>
@@ -904,38 +962,38 @@ function EditorImageCarousel({
             const fit = resolveFit(image);
             const framedImage = { ...image, fit };
             const isActive = index === selected;
-            const axes = framingPanAxes(image.width, image.height);
-            const interactive = Boolean(onFocusSave && isActive && fit === "cover" && (axes.x || axes.y));
+            const gesture = editorSlideFramingGesture(image, fit, images.length, Boolean(onFocusSave));
+            const { axes } = gesture;
+            const reframeGestures = isActive && gesture.reframeGestures;
             return (
               <div
-                className={`carousel-slide photo-frame framing-frame${fit === "contain" ? " carousel-slide-contain framing-frame-contain" : ""}${interactive ? " framing-frame-active" : ""}${dragging && isActive ? " framing-frame-dragging" : ""}`}
+                className={`carousel-slide photo-frame framing-frame${fit === "contain" ? " carousel-slide-contain framing-frame-contain" : ""}${reframeGestures ? " framing-frame-active" : ""}${reframeGestures && gesture.deferCarouselDrag ? " framing-frame-pan-x" : ""}${dragging && isActive ? " framing-frame-dragging" : ""}`}
                 key={image.id}
                 onPointerDown={
-                  interactive
+                  reframeGestures
                     ? (event) => {
                         if (isFramingControl(event.target)) return;
-                        event.currentTarget.setPointerCapture(event.pointerId);
-                        dragRef.current = {
-                          id: image.id,
-                          startX: event.clientX,
-                          startY: event.clientY,
-                          focusX: focus.x,
-                          focusY: focus.y,
-                          width: event.currentTarget.clientWidth,
-                          height: event.currentTarget.clientHeight,
-                          axes,
-                        };
-                        setDragging(true);
+                        beginReframeDrag(event, image, focus, axes, gesture.deferCarouselDrag);
                       }
                     : undefined
                 }
                 onPointerMove={
-                  interactive
+                  reframeGestures
                     ? (event) => {
                         const drag = dragRef.current;
                         if (!drag || drag.id !== image.id) return;
                         const dx = event.clientX - drag.startX;
                         const dy = event.clientY - drag.startY;
+                        if (drag.deferCarouselDrag && !drag.started) {
+                          const vertical =
+                            Math.abs(dy) >= EDITOR_REFRAME_DRAG_THRESHOLD_PX &&
+                            Math.abs(dy) > Math.abs(dx) * 1.15;
+                          if (!vertical) return;
+                          drag.started = true;
+                          setDragging(true);
+                          event.currentTarget.setPointerCapture(drag.pointerId);
+                        }
+                        if (!drag.started) return;
                         const nextX = drag.axes.x ? clamp01(drag.focusX + dx / drag.width) : drag.focusX;
                         const nextY = drag.axes.y ? clamp01(drag.focusY + dy / drag.height) : drag.focusY;
                         setFocusById((current) => ({
@@ -946,17 +1004,27 @@ function EditorImageCarousel({
                     : undefined
                 }
                 onPointerUp={
-                  interactive
+                  reframeGestures
                     ? (event) => {
                         if (isFramingControl(event.target)) return;
+                        const drag = dragRef.current;
+                        if (drag && !drag.started) {
+                          dragRef.current = null;
+                          return;
+                        }
                         finishDrag(image.id);
                       }
                     : undefined
                 }
                 onPointerCancel={
-                  interactive
+                  reframeGestures
                     ? (event) => {
                         if (isFramingControl(event.target)) return;
+                        const drag = dragRef.current;
+                        if (drag && !drag.started) {
+                          dragRef.current = null;
+                          return;
+                        }
                         finishDrag(image.id);
                       }
                     : undefined

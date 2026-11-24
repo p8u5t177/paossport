@@ -28,7 +28,7 @@ import {
   uniqueSlug,
   uniqueTripSlug,
 } from "./media.js";
-import { reverseGeocodeLabel } from "./geocode.js";
+import { reverseGeocodeLabel, searchPlaces } from "./geocode.js";
 import { mapProfileLocation, type ProfileRow } from "./profile-map.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -110,6 +110,38 @@ function mapTrip(tripId: string | null | undefined) {
     .get(tripId) as { id: string; slug: string; title: string } | undefined;
   if (!trip) return undefined;
   return { id: trip.id, slug: trip.slug, title: trip.title };
+}
+
+type TripCrossingRow = {
+  from_place_name: string | null;
+  from_lat: number | null;
+  from_lng: number | null;
+  arrived_place_name: string | null;
+  arrived_lat: number | null;
+  arrived_lng: number | null;
+};
+
+function mapTripCrossing(trip: TripCrossingRow) {
+  if (
+    trip.from_lat == null ||
+    trip.from_lng == null ||
+    trip.arrived_lat == null ||
+    trip.arrived_lng == null
+  ) {
+    return undefined;
+  }
+  return {
+    from: {
+      name: trip.from_place_name ?? undefined,
+      lat: trip.from_lat,
+      lng: trip.from_lng,
+    },
+    arrived: {
+      name: trip.arrived_place_name ?? undefined,
+      lat: trip.arrived_lat,
+      lng: trip.arrived_lng,
+    },
+  };
 }
 
 function resolvePostOrganization(
@@ -275,8 +307,14 @@ function feedTripIdsWithPosts(includeDrafts: boolean): Set<string> {
 
 function mapFeedTrip(tripId: string, includeDrafts: boolean) {
   const trip = db
-    .prepare(`SELECT id, slug, title FROM trip WHERE id = ?`)
-    .get(tripId) as { id: string; slug: string; title: string } | undefined;
+    .prepare(
+      `SELECT id, slug, title, from_place_name, from_lat, from_lng,
+              arrived_place_name, arrived_lat, arrived_lng
+       FROM trip WHERE id = ?`,
+    )
+    .get(tripId) as
+    | ({ id: string; slug: string; title: string } & TripCrossingRow)
+    | undefined;
   if (!trip) return undefined;
   const draftClause = includeDrafts ? "1 = 1" : "p.is_draft = 0";
   const chapters = db
@@ -292,6 +330,7 @@ function mapFeedTrip(tripId: string, includeDrafts: boolean) {
     id: trip.id,
     slug: trip.slug,
     title: trip.title,
+    crossing: mapTripCrossing(trip),
     chapters: chapters.map((chapter) => ({
       id: chapter.id,
       slug: chapter.slug,
@@ -473,8 +512,12 @@ app.get("/api/admin/posts/:slug", admin, (req, res) => {
 
 app.get("/api/admin/trips", admin, (_req, res) => {
   const trips = db
-    .prepare(`SELECT id, slug, title, sort_order FROM trip ORDER BY sort_order, title COLLATE NOCASE`)
-    .all() as Array<{ id: string; slug: string; title: string; sort_order: number }>;
+    .prepare(
+      `SELECT id, slug, title, sort_order, from_place_name, from_lat, from_lng,
+              arrived_place_name, arrived_lat, arrived_lng
+       FROM trip ORDER BY sort_order, title COLLATE NOCASE`,
+    )
+    .all() as Array<{ id: string; slug: string; title: string; sort_order: number } & TripCrossingRow>;
   const chapters = db
     .prepare(
       `SELECT id, trip_id, slug, title, sort_order FROM chapter ORDER BY sort_order, title COLLATE NOCASE`,
@@ -486,6 +529,7 @@ app.get("/api/admin/trips", admin, (_req, res) => {
       slug: trip.slug,
       title: trip.title,
       albumId: tripAlbumId(trip.id),
+      crossing: mapTripCrossing(trip),
       chapters: chapters
         .filter((chapter) => chapter.trip_id === trip.id)
         .map((chapter) => ({
@@ -522,26 +566,116 @@ app.post("/api/admin/trips", admin, (req, res) => {
 
 app.patch("/api/admin/trips/:tripId", admin, (req, res) => {
   const tripId = String(req.params.tripId ?? "");
-  const trip = db.prepare("SELECT id, slug, title FROM trip WHERE id = ?").get(tripId) as
-    | { id: string; slug: string; title: string }
+  const trip = db
+    .prepare(
+      `SELECT id, slug, title, from_place_name, from_lat, from_lng,
+              arrived_place_name, arrived_lat, arrived_lng
+       FROM trip WHERE id = ?`,
+    )
+    .get(tripId) as
+    | ({ id: string; slug: string; title: string } & TripCrossingRow)
     | undefined;
   if (!trip) {
     res.status(404).json({ error: "Trip not found" });
     return;
   }
-  if (req.body.albumId === undefined) {
-    res.status(400).json({ error: "albumId required" });
+
+  const crossingKeys = [
+    "fromPlaceName",
+    "fromLat",
+    "fromLng",
+    "arrivedPlaceName",
+    "arrivedLat",
+    "arrivedLng",
+  ] as const;
+  const updatesCrossing = crossingKeys.some((key) => req.body[key] !== undefined);
+  if (req.body.albumId === undefined && !updatesCrossing) {
+    res.status(400).json({ error: "No trip changes supplied" });
     return;
   }
-  const albumRaw = req.body.albumId;
-  const albumId =
-    albumRaw === null || albumRaw === "" ? null : String(albumRaw).trim();
-  if (albumId && !db.prepare("SELECT id FROM album WHERE id = ?").get(albumId)) {
-    res.status(400).json({ error: "Collection not found" });
-    return;
+
+  let albumId = tripAlbumId(tripId);
+  if (req.body.albumId !== undefined) {
+    const albumRaw = req.body.albumId;
+    albumId = albumRaw === null || albumRaw === "" ? null : String(albumRaw).trim();
+    if (albumId && !db.prepare("SELECT id FROM album WHERE id = ?").get(albumId)) {
+      res.status(400).json({ error: "Collection not found" });
+      return;
+    }
   }
-  setTripAlbum(tripId, albumId);
-  res.json({ id: trip.id, slug: trip.slug, title: trip.title, albumId });
+
+  let updatedCrossing: TripCrossingRow = trip;
+  if (updatesCrossing) {
+    const place = (value: unknown) => {
+      const normalized = value == null ? "" : String(value).trim();
+      return normalized || null;
+    };
+    const coordinate = (value: unknown) => {
+      if (value == null || value === "") return null;
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : Number.NaN;
+    };
+    const fromPlaceName = place(req.body.fromPlaceName);
+    const fromLat = coordinate(req.body.fromLat);
+    const fromLng = coordinate(req.body.fromLng);
+    const arrivedPlaceName = place(req.body.arrivedPlaceName);
+    const arrivedLat = coordinate(req.body.arrivedLat);
+    const arrivedLng = coordinate(req.body.arrivedLng);
+    const values = [fromLat, fromLng, arrivedLat, arrivedLng];
+    if (values.some((value) => Number.isNaN(value))) {
+      res.status(400).json({ error: "Crossing coordinates must be valid numbers" });
+      return;
+    }
+    const hasAnyCrossingValue =
+      Boolean(fromPlaceName || arrivedPlaceName) || values.some((value) => value != null);
+    const hasCompleteCrossing =
+      Boolean(fromPlaceName && arrivedPlaceName) && values.every((value) => value != null);
+    if (hasAnyCrossingValue && !hasCompleteCrossing) {
+      res.status(400).json({ error: "Choose both crossing places from the suggestions" });
+      return;
+    }
+    if (
+      (fromLat != null && (fromLat < -90 || fromLat > 90)) ||
+      (arrivedLat != null && (arrivedLat < -90 || arrivedLat > 90)) ||
+      (fromLng != null && (fromLng < -180 || fromLng > 180)) ||
+      (arrivedLng != null && (arrivedLng < -180 || arrivedLng > 180))
+    ) {
+      res.status(400).json({ error: "Crossing coordinates are outside the valid range" });
+      return;
+    }
+    db.prepare(
+      `UPDATE trip
+       SET from_place_name = ?, from_lat = ?, from_lng = ?,
+           arrived_place_name = ?, arrived_lat = ?, arrived_lng = ?,
+           updated_at = datetime('now')
+       WHERE id = ?`,
+    ).run(
+      fromPlaceName,
+      fromLat,
+      fromLng,
+      arrivedPlaceName,
+      arrivedLat,
+      arrivedLng,
+      tripId,
+    );
+    updatedCrossing = {
+      from_place_name: fromPlaceName,
+      from_lat: fromLat,
+      from_lng: fromLng,
+      arrived_place_name: arrivedPlaceName,
+      arrived_lat: arrivedLat,
+      arrived_lng: arrivedLng,
+    };
+  }
+  if (req.body.albumId !== undefined) setTripAlbum(tripId, albumId);
+
+  res.json({
+    id: trip.id,
+    slug: trip.slug,
+    title: trip.title,
+    albumId,
+    crossing: mapTripCrossing(updatedCrossing),
+  });
 });
 
 app.get("/api/admin/albums", admin, (_req, res) => {
@@ -974,6 +1108,21 @@ app.get("/api/geocode/reverse", admin, geocodeLimiter, async (req, res) => {
   } catch (e) {
     console.error("reverse-geocode", e);
     res.json({ name: null });
+  }
+});
+
+app.get("/api/geocode/search", admin, geocodeLimiter, async (req, res) => {
+  const q = String(req.query.q ?? "").trim();
+  if (q.length < 2 || q.length > 100) {
+    res.status(400).json({ error: "q must be 2–100 characters" });
+    return;
+  }
+  try {
+    const results = await searchPlaces(q);
+    res.json({ results });
+  } catch (e) {
+    console.error("geocode-search", e);
+    res.json({ results: [] });
   }
 });
 

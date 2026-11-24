@@ -62,6 +62,12 @@ export function getDb() {
       id TEXT PRIMARY KEY,
       slug TEXT NOT NULL UNIQUE,
       title TEXT NOT NULL,
+      from_place_name TEXT,
+      from_lat REAL,
+      from_lng REAL,
+      arrived_place_name TEXT,
+      arrived_lat REAL,
+      arrived_lng REAL,
       sort_order INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -125,6 +131,27 @@ export function getDb() {
   }
   if (!postColNames.has("trip_id")) {
     db.exec(`ALTER TABLE post ADD COLUMN trip_id TEXT REFERENCES trip(id) ON DELETE SET NULL`);
+  }
+
+  const tripCols = db.prepare("PRAGMA table_info(trip)").all() as { name: string }[];
+  const tripColNames = new Set(tripCols.map((col) => col.name));
+  if (!tripColNames.has("from_place_name")) {
+    db.exec(`ALTER TABLE trip ADD COLUMN from_place_name TEXT`);
+  }
+  if (!tripColNames.has("from_lat")) {
+    db.exec(`ALTER TABLE trip ADD COLUMN from_lat REAL`);
+  }
+  if (!tripColNames.has("from_lng")) {
+    db.exec(`ALTER TABLE trip ADD COLUMN from_lng REAL`);
+  }
+  if (!tripColNames.has("arrived_place_name")) {
+    db.exec(`ALTER TABLE trip ADD COLUMN arrived_place_name TEXT`);
+  }
+  if (!tripColNames.has("arrived_lat")) {
+    db.exec(`ALTER TABLE trip ADD COLUMN arrived_lat REAL`);
+  }
+  if (!tripColNames.has("arrived_lng")) {
+    db.exec(`ALTER TABLE trip ADD COLUMN arrived_lng REAL`);
   }
 
   const imageCols = db.prepare("PRAGMA table_info(post_image)").all() as { name: string }[];

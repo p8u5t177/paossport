@@ -7,10 +7,15 @@ import { geocodeDevFallback } from "./dev-geocode-plugin.ts";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-function rewriteRemoteSessionCookies(proxy: import("http-proxy").Server) {
+function rewriteRemoteSessionCookies(proxy: {
+  on(
+    event: "proxyRes",
+    listener: (proxyRes: { headers: { [key: string]: string | string[] | undefined } }) => void,
+  ): void;
+}) {
   proxy.on("proxyRes", (proxyRes) => {
     const setCookie = proxyRes.headers["set-cookie"];
-    if (!setCookie?.length) return;
+    if (!Array.isArray(setCookie) || !setCookie.length) return;
     proxyRes.headers["set-cookie"] = setCookie.map((cookie) =>
       cookie.replace(/;\s*Secure/gi, "").replace(/;\s*Domain=[^;]+/gi, ""),
     );

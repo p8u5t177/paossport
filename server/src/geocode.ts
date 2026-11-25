@@ -79,7 +79,7 @@ function placeRank(hit: NominatimSearchHit): number {
   return 4;
 }
 
-function nominatimHeaders(): HeadersInit {
+function nominatimHeaders(): Record<string, string> {
   return {
     Accept: "application/json",
     "Accept-Language": "en",

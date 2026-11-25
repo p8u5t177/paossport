@@ -2417,8 +2417,8 @@ function normalizeDataEnvironment(
 
 async function saveDataEnvironment(patch: Partial<AdminDataEnvironment>): Promise<AdminDataEnvironment> {
   const attempts: Array<{ url: string; method: string }> = [
-    { url: "/api/admin/data-environment", method: "PATCH" },
     { url: "/api/admin/data-environment", method: "POST" },
+    { url: "/api/admin/data-environment", method: "PATCH" },
     { url: "/api/admin/settings/database", method: "PATCH" },
   ];
   let lastError: Error | undefined;

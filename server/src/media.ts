@@ -10,6 +10,23 @@ export const MEDIA_ROOT = path.resolve(
 
 const ALLOWED = new Set(["image/jpeg", "image/png", "image/webp"]);
 
+export const MASTER_MAX_EDGE = 2000;
+export const FEED_MAX_EDGE = 960;
+const MASTER_WEBP_QUALITY = 85;
+const FEED_WEBP_QUALITY = 80;
+
+export function feedStorageKeyForMaster(storageKey: string) {
+  return storageKey.replace(/\.webp$/i, "-feed.webp");
+}
+
+function mediaPath(storageKey: string) {
+  return path.join(MEDIA_ROOT, storageKey.replace(/\\/g, "/"));
+}
+
+function publicUrlForStorageKey(storageKey: string) {
+  return `/media/${storageKey.replace(/\\/g, "/")}`;
+}
+
 export function ensureMediaDirs() {
   fs.mkdirSync(MEDIA_ROOT, { recursive: true });
 }
@@ -28,10 +45,33 @@ export async function parseExif(buffer: Buffer) {
   }
 }
 
-export async function saveImage(file: Pick<Express.Multer.File, "buffer" | "mimetype">) {
+async function writeFeedVariant(source: Buffer | string, dest: string) {
+  await sharp(source)
+    .rotate()
+    .resize({ width: FEED_MAX_EDGE, height: FEED_MAX_EDGE, fit: "inside", withoutEnlargement: true })
+    .webp({ quality: FEED_WEBP_QUALITY })
+    .toFile(dest);
+}
+
+export async function ensureFeedVariantForStorageKey(storageKey: string): Promise<string | null> {
+  const masterPath = mediaPath(storageKey);
+  if (!masterPath.startsWith(MEDIA_ROOT) || !fs.existsSync(masterPath)) return null;
+  const feedKey = feedStorageKeyForMaster(storageKey);
+  const feedPath = mediaPath(feedKey);
+  if (!fs.existsSync(feedPath)) {
+    await writeFeedVariant(masterPath, feedPath);
+  }
+  return publicUrlForStorageKey(feedKey);
+}
+
+export async function saveImage(
+  file: Pick<Express.Multer.File, "buffer" | "mimetype">,
+  options?: { feedVariant?: boolean },
+) {
   if (!ALLOWED.has(file.mimetype)) {
     throw new Error("Invalid file type");
   }
+  const feedVariant = options?.feedVariant !== false;
   const now = new Date();
   const sub = `${now.getFullYear()}/${String(now.getMonth() + 1).padStart(2, "0")}`;
   const dir = path.join(MEDIA_ROOT, sub);
@@ -41,17 +81,25 @@ export async function saveImage(file: Pick<Express.Multer.File, "buffer" | "mime
   const dest = path.join(dir, filename);
   const meta = await sharp(file.buffer)
     .rotate()
-    .resize({ width: 2000, height: 2000, fit: "inside", withoutEnlargement: true })
-    .webp({ quality: 85 })
+    .resize({ width: MASTER_MAX_EDGE, height: MASTER_MAX_EDGE, fit: "inside", withoutEnlargement: true })
+    .webp({ quality: MASTER_WEBP_QUALITY })
     .withMetadata({ orientation: 1 })
     .toFile(dest);
   const storageKey = path.join(sub, filename);
-  const publicUrl = `/media/${storageKey.replace(/\\/g, "/")}`;
+  const publicUrl = publicUrlForStorageKey(storageKey);
+  let feedPublicUrl: string | undefined;
+  if (feedVariant) {
+    const feedFilename = `${id}-feed.webp`;
+    const feedDest = path.join(dir, feedFilename);
+    await writeFeedVariant(file.buffer, feedDest);
+    feedPublicUrl = publicUrlForStorageKey(path.join(sub, feedFilename));
+  }
   const exif = await parseExif(file.buffer);
   return {
     id,
     storageKey,
     publicUrl,
+    feedPublicUrl,
     width: meta.width,
     height: meta.height,
     exif,
@@ -87,11 +135,32 @@ export async function reconcileImageDimensions(db: import("better-sqlite3").Data
   }
 }
 
+export function deletePostImageFiles(storageKey: string) {
+  const master = mediaPath(storageKey);
+  const feed = mediaPath(feedStorageKeyForMaster(storageKey));
+  for (const full of [master, feed]) {
+    if (full.startsWith(MEDIA_ROOT) && fs.existsSync(full)) fs.unlinkSync(full);
+  }
+}
+
 export function deleteImageByUrl(publicUrl: string) {
   if (!publicUrl.startsWith("/media/")) return;
   const rel = publicUrl.slice("/media/".length);
-  const full = path.join(MEDIA_ROOT, rel);
-  if (full.startsWith(MEDIA_ROOT) && fs.existsSync(full)) fs.unlinkSync(full);
+  deletePostImageFiles(rel);
+}
+
+export async function reconcileImageFeedVariants(db: import("better-sqlite3").Database) {
+  const rows = db
+    .prepare(
+      `SELECT id, storage_key, feed_public_url FROM post_image
+       WHERE feed_public_url IS NULL OR feed_public_url = ''`,
+    )
+    .all() as Array<{ id: string; storage_key: string; feed_public_url: string | null }>;
+  const update = db.prepare("UPDATE post_image SET feed_public_url = ? WHERE id = ?");
+  for (const row of rows) {
+    const feedUrl = await ensureFeedVariantForStorageKey(row.storage_key);
+    if (feedUrl) update.run(feedUrl, row.id);
+  }
 }
 
 function slugify(input: string): string {

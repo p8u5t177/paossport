@@ -27,9 +27,10 @@ import {
 } from "./auth.js";
 import {
   MEDIA_ROOT,
-  deleteImageByUrl,
+  deletePostImageFiles,
   ensureMediaDirs,
   reconcileImageDimensions,
+  reconcileImageFeedVariants,
   saveImage,
   uniqueAlbumSlug,
   uniqueChapterSlug,
@@ -51,8 +52,6 @@ const clientDist = path.resolve(__dirname, "../../client/dist");
 const sessionDb = getDb("test");
 loadAppConfig(sessionDb);
 ensureMediaDirs();
-void reconcileImageDimensions(sessionDb);
-void reconcileImageDimensions(getDb("production"));
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -194,7 +193,7 @@ function mapPost(
   },
 ) {
   const images = activeDb().prepare(
-      `SELECT id, sort_order, storage_key, public_url, width, height, alt, has_location_metadata, has_date_metadata, focus_x, focus_y, fit_mode
+      `SELECT id, sort_order, storage_key, public_url, feed_public_url, width, height, alt, has_location_metadata, has_date_metadata, focus_x, focus_y, fit_mode
        FROM post_image WHERE post_id = ? ORDER BY sort_order`,
     )
     .all(post.id) as Array<{
@@ -202,6 +201,7 @@ function mapPost(
     sort_order: number;
     storage_key: string;
     public_url: string;
+    feed_public_url: string | null;
     width: number | null;
     height: number | null;
     alt: string | null;
@@ -230,6 +230,7 @@ function mapPost(
     images: images.map((img) => ({
       id: img.id,
       url: img.public_url,
+      feedUrl: img.feed_public_url ?? undefined,
       width: img.width ?? undefined,
       height: img.height ?? undefined,
       alt: img.alt ?? undefined,
@@ -824,7 +825,10 @@ app.get("/api/admin/posts", ...admin, (_req, res) => {
       trip_title: string | null;
     }[]
   ).map((r) => {
-    const thumb = activeDb().prepare(`SELECT public_url FROM post_image WHERE post_id = ? ORDER BY sort_order LIMIT 1`)
+    const thumb = activeDb()
+      .prepare(
+        `SELECT COALESCE(feed_public_url, public_url) AS public_url FROM post_image WHERE post_id = ? ORDER BY sort_order LIMIT 1`,
+      )
       .get(r.id) as { public_url: string } | undefined;
     return {
       id: r.id,
@@ -905,8 +909,8 @@ app.post("/api/posts", ...admin, upload.array("images", 10), async (req, res) =>
     );
 
     const insertImg = activeDb().prepare(
-      `INSERT INTO post_image (id, post_id, sort_order, storage_key, public_url, width, height, has_location_metadata, has_date_metadata)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO post_image (id, post_id, sort_order, storage_key, public_url, feed_public_url, width, height, has_location_metadata, has_date_metadata)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     for (let i = 0; i < saved.length; i++) {
       const s = saved[i]!;
@@ -918,6 +922,7 @@ app.post("/api/posts", ...admin, upload.array("images", 10), async (req, res) =>
         i,
         s.storageKey,
         s.publicUrl,
+        s.feedPublicUrl ?? null,
         s.width,
         s.height,
         hasLocation ? 1 : 0,
@@ -994,8 +999,8 @@ async function appendPostImages(postId: string, files: Express.Multer.File[]) {
     throw new Error("TOO_MANY_IMAGES");
   }
   const insertImg = activeDb().prepare(
-    `INSERT INTO post_image (id, post_id, sort_order, storage_key, public_url, width, height, has_location_metadata, has_date_metadata)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO post_image (id, post_id, sort_order, storage_key, public_url, feed_public_url, width, height, has_location_metadata, has_date_metadata)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   for (let i = 0; i < files.length; i++) {
     const s = await saveImage(files[i]!);
@@ -1007,6 +1012,7 @@ async function appendPostImages(postId: string, files: Express.Multer.File[]) {
       existingCount + i,
       s.storageKey,
       s.publicUrl,
+      s.feedPublicUrl ?? null,
       s.width,
       s.height,
       hasLocation ? 1 : 0,
@@ -1043,8 +1049,8 @@ app.post("/api/posts/:id/images", ...admin, upload.array("images", 10), async (r
 });
 
 app.delete("/api/post-images/:id", ...admin, (req, res) => {
-  const row = activeDb().prepare("SELECT id, post_id, public_url FROM post_image WHERE id = ?").get(req.params.id) as
-    | { id: string; post_id: string; public_url: string }
+  const row = activeDb().prepare("SELECT id, post_id, storage_key FROM post_image WHERE id = ?").get(req.params.id) as
+    | { id: string; post_id: string; storage_key: string }
     | undefined;
   if (!row) {
     res.status(404).json({ error: "Image not found" });
@@ -1057,7 +1063,7 @@ app.delete("/api/post-images/:id", ...admin, (req, res) => {
     res.status(400).json({ error: "Keep at least one photo on the journal" });
     return;
   }
-  deleteImageByUrl(row.public_url);
+  deletePostImageFiles(row.storage_key);
   activeDb().prepare("DELETE FROM post_image WHERE id = ?").run(row.id);
   const remaining = activeDb().prepare("SELECT id FROM post_image WHERE post_id = ? ORDER BY sort_order, id")
     .all(row.post_id) as { id: string }[];
@@ -1065,6 +1071,42 @@ app.delete("/api/post-images/:id", ...admin, (req, res) => {
   remaining.forEach((img, index) => setOrder.run(index, img.id));
   activeDb().prepare(`UPDATE post SET updated_at = datetime('now') WHERE id = ?`).run(row.post_id);
   const updated = activeDb().prepare("SELECT * FROM post WHERE id = ?").get(row.post_id);
+  res.json(mapPost(updated as Parameters<typeof mapPost>[0]));
+});
+
+app.patch("/api/posts/:id/images/order", ...admin, (req, res) => {
+  const postId = String(req.params.id);
+  const existing = activeDb().prepare("SELECT id FROM post WHERE id = ?").get(postId) as { id: string } | undefined;
+  if (!existing) {
+    res.status(404).json({ error: "Post not found" });
+    return;
+  }
+  const rawIds = (req.body as { imageIds?: unknown }).imageIds;
+  const imageIds = Array.isArray(rawIds) ? rawIds.map((id) => String(id)) : [];
+  const current = activeDb()
+    .prepare("SELECT id FROM post_image WHERE post_id = ? ORDER BY sort_order, id")
+    .all(postId) as { id: string }[];
+  const currentIds = current.map((row) => row.id);
+  const currentSet = new Set(currentIds);
+  const seen = new Set<string>();
+  const valid =
+    imageIds.length === currentIds.length &&
+    imageIds.every((id) => {
+      if (!currentSet.has(id) || seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
+  if (!valid) {
+    res.status(400).json({ error: "Image order must include every photo exactly once" });
+    return;
+  }
+  const setOrder = activeDb().prepare("UPDATE post_image SET sort_order = ? WHERE id = ? AND post_id = ?");
+  const applyOrder = activeDb().transaction((ids: string[]) => {
+    ids.forEach((id, index) => setOrder.run(index, id, postId));
+    activeDb().prepare(`UPDATE post SET updated_at = datetime('now') WHERE id = ?`).run(postId);
+  });
+  applyOrder(imageIds);
+  const updated = activeDb().prepare("SELECT * FROM post WHERE id = ?").get(postId);
   res.json(mapPost(updated as Parameters<typeof mapPost>[0]));
 });
 
@@ -1149,9 +1191,9 @@ app.patch("/api/posts/:id", ...admin, (req, res) => {
 });
 
 app.delete("/api/posts/:id", ...admin, (req, res) => {
-  const images = activeDb().prepare("SELECT public_url FROM post_image WHERE post_id = ?")
-    .all(req.params.id) as { public_url: string }[];
-  for (const img of images) deleteImageByUrl(img.public_url);
+  const images = activeDb().prepare("SELECT storage_key FROM post_image WHERE post_id = ?")
+    .all(req.params.id) as { storage_key: string }[];
+  for (const img of images) deletePostImageFiles(img.storage_key);
   activeDb().prepare("DELETE FROM post WHERE id = ?").run(req.params.id);
   res.json({ ok: true });
 });
@@ -1194,7 +1236,7 @@ app.patch("/api/profile", ...admin, upload.single("avatar"), async (req, res) =>
   const bio = req.body.bio != null ? String(req.body.bio) : undefined;
   let avatarUrl: string | undefined;
   if (req.file) {
-    const saved = await saveImage(req.file);
+    const saved = await saveImage(req.file, { feedVariant: false });
     avatarUrl = saved.publicUrl;
   }
   const cur = activeDb().prepare("SELECT * FROM profile WHERE id = 1").get() as ProfileRow;
@@ -1277,4 +1319,19 @@ if (serveClient) {
 
 app.listen(PORT, () => {
   console.log(`API http://localhost:${PORT}`);
+  // Run after listen so deploy health checks aren't blocked; keeps peak memory off startup.
+  setTimeout(() => {
+    void reconcileImageDimensions(sessionDb).catch((err) => {
+      console.warn("reconcileImageDimensions (test):", err);
+    });
+    void reconcileImageDimensions(getDb("production")).catch((err) => {
+      console.warn("reconcileImageDimensions (production):", err);
+    });
+    void reconcileImageFeedVariants(sessionDb).catch((err) => {
+      console.warn("reconcileImageFeedVariants (test):", err);
+    });
+    void reconcileImageFeedVariants(getDb("production")).catch((err) => {
+      console.warn("reconcileImageFeedVariants (production):", err);
+    });
+  }, 5_000);
 });

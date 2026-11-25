@@ -7,9 +7,9 @@ import {
   useRef,
   useState,
   type FormEvent,
+  type PointerEvent as ReactPointerEvent,
 } from "react";
 import useEmblaCarousel from "embla-carousel-react";
-import exifr from "exifr";
 import {
   Link,
   Navigate,
@@ -27,6 +27,7 @@ import { resolveStoryHtml, storyHtmlToPlainText, storyToEditorHtml } from "./ric
 type Image = {
   id: string;
   url: string;
+  feedUrl?: string;
   width?: number;
   height?: number;
   alt?: string;
@@ -41,6 +42,30 @@ const FRAME_ASPECT = 4 / 5;
 
 function clamp01(value: number) {
   return Math.min(1, Math.max(0, value));
+}
+
+function sortByIds<T extends { id: string }>(items: T[], ids: string[]): T[] {
+  const byId = new Map(items.map((item) => [item.id, item]));
+  const next: T[] = [];
+  for (const id of ids) {
+    const item = byId.get(id);
+    if (item) next.push(item);
+  }
+  return next.length === items.length ? next : items;
+}
+
+function moveIdTo(ids: string[], fromId: string, toId: string) {
+  const from = ids.indexOf(fromId);
+  const to = ids.indexOf(toId);
+  if (from < 0 || to < 0 || from === to) return ids;
+  const next = ids.slice();
+  const [item] = next.splice(from, 1);
+  next.splice(to, 0, item!);
+  return next;
+}
+
+function imageFeedSrc(image: Pick<Image, "url" | "feedUrl">) {
+  return image.feedUrl || image.url;
 }
 
 function imageObjectPosition(image: Pick<Image, "focusX" | "focusY">) {
@@ -634,6 +659,7 @@ function FeedChapterBar({
 
 async function readFileExif(file: File): Promise<FileExif> {
   try {
+    const { default: exifr } = await import("exifr");
     const exif = await exifr.parse(file, { pick: ["DateTimeOriginal", "latitude", "longitude"] });
     if (!exif) return { hasLocation: false, hasDate: false };
     const lat = typeof exif.latitude === "number" ? exif.latitude : undefined;
@@ -935,25 +961,218 @@ function FramingFitToggle({
   );
 }
 
+type ReorderOptions = { commit?: boolean };
+
+function EditorPhotoStrip({
+  images,
+  selectedId,
+  onSelect,
+  onReorder,
+  onRemove,
+  onAdd,
+  busy = false,
+}: {
+  images: Image[];
+  selectedId?: string;
+  onSelect?: (imageId: string) => void;
+  onReorder?: (imageIds: string[], options?: ReorderOptions) => void;
+  onRemove?: (imageId: string) => void;
+  onAdd?: () => void;
+  busy?: boolean;
+}) {
+  const itemRefs = useRef(new Map<string, HTMLElement>());
+  const liveIdsRef = useRef(images.map((image) => image.id));
+  liveIdsRef.current = images.map((image) => image.id);
+  const dragRef = useRef<{
+    id: string;
+    pointerId: number;
+    startX: number;
+    startY: number;
+    started: boolean;
+    fromTouch: boolean;
+  } | null>(null);
+  const pressTimerRef = useRef<number | null>(null);
+  const draggedRef = useRef(false);
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const canReorder = Boolean(onReorder) && images.length > 1 && !busy;
+
+  const clearPressTimer = () => {
+    if (pressTimerRef.current != null) {
+      window.clearTimeout(pressTimerRef.current);
+      pressTimerRef.current = null;
+    }
+  };
+
+  const hitId = (x: number, y: number) => {
+    for (const image of images) {
+      const el = itemRefs.current.get(image.id);
+      if (!el) continue;
+      const box = el.getBoundingClientRect();
+      if (x >= box.left && x <= box.right && y >= box.top && y <= box.bottom) return image.id;
+    }
+    return null;
+  };
+
+  const endDrag = (commit: boolean) => {
+    clearPressTimer();
+    const drag = dragRef.current;
+    dragRef.current = null;
+    setDraggingId(null);
+    if (commit && drag?.started && onReorder) {
+      onReorder(liveIdsRef.current, { commit: true });
+    }
+  };
+
+  return (
+    <div
+      className="preview-strip editor-photo-strip"
+      role="list"
+      aria-label={canReorder ? "Journal photos. Drag to reorder" : "Journal photos"}
+    >
+      {images.map((image, index) => {
+        const selected = image.id === selectedId;
+        return (
+          <div
+            className={`photo-frame${selected ? " strip-item-selected" : ""}${draggingId === image.id ? " strip-item-dragging" : ""}${canReorder ? " strip-item-reorderable" : ""}`}
+            key={image.id}
+            ref={(node) => {
+              if (node) itemRefs.current.set(image.id, node);
+              else itemRefs.current.delete(image.id);
+            }}
+            onPointerDown={
+              canReorder
+                ? (event: ReactPointerEvent<HTMLDivElement>) => {
+                    if (event.button !== 0) return;
+                    if (event.target instanceof Element && event.target.closest("button")) return;
+                    clearPressTimer();
+                    const fromTouch = event.pointerType !== "mouse";
+                    dragRef.current = {
+                      id: image.id,
+                      pointerId: event.pointerId,
+                      startX: event.clientX,
+                      startY: event.clientY,
+                      started: false,
+                      fromTouch,
+                    };
+                    draggedRef.current = false;
+                    if (!fromTouch) return;
+                    const target = event.currentTarget;
+                    pressTimerRef.current = window.setTimeout(() => {
+                      const drag = dragRef.current;
+                      if (!drag || drag.id !== image.id) return;
+                      drag.started = true;
+                      draggedRef.current = true;
+                      setDraggingId(image.id);
+                      target.setPointerCapture(drag.pointerId);
+                    }, 420);
+                  }
+                : undefined
+            }
+            onPointerMove={
+              canReorder
+                ? (event: ReactPointerEvent<HTMLDivElement>) => {
+                    const drag = dragRef.current;
+                    if (!drag || drag.id !== image.id) return;
+                    const dx = event.clientX - drag.startX;
+                    const dy = event.clientY - drag.startY;
+                    const distance = Math.hypot(dx, dy);
+                    if (!drag.started) {
+                      if (distance > 8) {
+                        if (drag.fromTouch) {
+                          clearPressTimer();
+                          dragRef.current = null;
+                          return;
+                        }
+                        drag.started = true;
+                        draggedRef.current = true;
+                        setDraggingId(image.id);
+                        event.currentTarget.setPointerCapture(drag.pointerId);
+                      } else {
+                        return;
+                      }
+                    }
+                    const overId = hitId(event.clientX, event.clientY);
+                    if (!overId || overId === drag.id || !onReorder) return;
+                    const nextIds = moveIdTo(liveIdsRef.current, drag.id, overId);
+                    if (nextIds.join(",") === liveIdsRef.current.join(",")) return;
+                    liveIdsRef.current = nextIds;
+                    onReorder(nextIds, { commit: false });
+                  }
+                : undefined
+            }
+            onPointerUp={canReorder ? () => endDrag(true) : undefined}
+            onPointerCancel={canReorder ? () => endDrag(false) : undefined}
+            onClick={() => {
+              if (draggedRef.current) {
+                draggedRef.current = false;
+                return;
+              }
+              onSelect?.(image.id);
+            }}
+          >
+            <img
+              src={imageFeedSrc(image)}
+              alt={`Journal photo ${index + 1}`}
+              loading="lazy"
+              decoding="async"
+              draggable={false}
+            />
+            {index === 0 && images.length > 1 && <span className="strip-cover-badge">Cover</span>}
+            {onRemove && images.length > 1 && (
+              <button
+                type="button"
+                className="strip-remove"
+                disabled={busy}
+                aria-label={`Remove photo ${index + 1}`}
+                onClick={() => onRemove(image.id)}
+              >
+                <Icon name="x" size={14} />
+              </button>
+            )}
+          </div>
+        );
+      })}
+      {onAdd && images.length < 10 && (
+        <button type="button" disabled={busy} onClick={onAdd} aria-label="Add photos">
+          <Icon name="plus" />
+        </button>
+      )}
+    </div>
+  );
+}
+
 function EditorImageCarousel({
   images,
   legacyLocationOnFirst = false,
   onFocusSave,
   onFitChange,
   framingBusy = false,
+  onReorder,
+  onRemove,
+  onAdd,
+  imagesBusy = false,
 }: {
   images: Image[];
   legacyLocationOnFirst?: boolean;
   onFocusSave?: (imageId: string, focusX: number, focusY: number) => Promise<void>;
   onFitChange?: (imageId: string, fit: "cover" | "contain") => Promise<void>;
   framingBusy?: boolean;
+  onReorder?: (imageIds: string[], options?: ReorderOptions) => void;
+  onRemove?: (imageId: string) => void;
+  onAdd?: () => void;
+  imagesBusy?: boolean;
 }) {
   const allowCarouselDragRef = useRef(true);
+  const imagesRef = useRef(images);
+  imagesRef.current = images;
+  const ignoreSelectRef = useRef(false);
+  const imageOrderKey = images.map((image) => image.id).join(",");
   const [emblaRef, embla] = useEmblaCarousel({
     loop: images.length > 1,
     watchDrag: () => allowCarouselDragRef.current,
   });
-  const [selected, setSelected] = useState(0);
+  const [selectedId, setSelectedId] = useState(images[0]?.id);
+  const selected = Math.max(0, images.findIndex((image) => image.id === selectedId));
   const [focusById, setFocusById] = useState<Record<string, FocusPoint>>({});
   const [fitById, setFitById] = useState<Record<string, "cover" | "contain">>({});
   const [dragging, setDragging] = useState(false);
@@ -995,15 +1214,33 @@ function EditorImageCarousel({
 
   useEffect(() => {
     if (!embla) return;
-    const update = () => setSelected(embla.selectedScrollSnap());
-    update();
+    const update = () => {
+      if (ignoreSelectRef.current) return;
+      const id = imagesRef.current[embla.selectedScrollSnap()]?.id;
+      if (id) setSelectedId(id);
+    };
     embla.on("select", update);
-    embla.on("reInit", update);
     return () => {
       embla.off("select", update);
-      embla.off("reInit", update);
     };
   }, [embla]);
+
+  useEffect(() => {
+    if (images.some((image) => image.id === selectedId)) return;
+    setSelectedId(images[0]?.id);
+  }, [images, selectedId]);
+
+  useEffect(() => {
+    if (!embla || !selectedId) return;
+    const next = Math.max(0, imagesRef.current.findIndex((image) => image.id === selectedId));
+    if (embla.selectedScrollSnap() === next) return;
+    ignoreSelectRef.current = true;
+    embla.scrollTo(next, true);
+    const timer = window.setTimeout(() => {
+      ignoreSelectRef.current = false;
+    }, 120);
+    return () => window.clearTimeout(timer);
+  }, [embla, imageOrderKey, selectedId]);
 
   const finishDrag = (imageId: string) => {
     if (!dragRef.current) return;
@@ -1020,6 +1257,23 @@ function EditorImageCarousel({
     : null;
   const canReframe = Boolean(activeGesture?.reframeGestures);
   allowCarouselDragRef.current = activeGesture?.allowCarouselDrag ?? true;
+
+  const selectImage = (imageId: string) => {
+    setSelectedId(imageId);
+    const index = images.findIndex((image) => image.id === imageId);
+    if (index >= 0) embla?.scrollTo(index);
+  };
+
+  const moveSelected = (delta: number) => {
+    if (!onReorder) return;
+    const from = selected;
+    const to = from + delta;
+    if (to < 0 || to >= images.length) return;
+    const nextIds = images.map((image) => image.id);
+    const [item] = nextIds.splice(from, 1);
+    nextIds.splice(to, 0, item!);
+    onReorder(nextIds, { commit: true });
+  };
 
   const beginReframeDrag = (
     event: React.PointerEvent<HTMLDivElement>,
@@ -1050,6 +1304,7 @@ function EditorImageCarousel({
       <div className="carousel editor-carousel" ref={emblaRef}>
         <div className="carousel-track">
           {images.map((image, index) => {
+            const nearSlide = Math.abs(index - selected) <= 1 || images.length <= 2;
             const focus = focusById[image.id] ?? { x: image.focusX ?? 0.5, y: image.focusY ?? 0.5 };
             const fit = resolveFit(image);
             const framedImage = { ...image, fit };
@@ -1057,6 +1312,9 @@ function EditorImageCarousel({
             const gesture = editorSlideFramingGesture(image, fit, images.length, Boolean(onFocusSave));
             const { axes } = gesture;
             const reframeGestures = isActive && gesture.reframeGestures;
+            if (!nearSlide) {
+              return <div className="carousel-slide carousel-slide-placeholder" key={image.id} aria-hidden />;
+            }
             return (
               <div
                 className={`carousel-slide photo-frame framing-frame${fit === "contain" ? " carousel-slide-contain framing-frame-contain" : ""}${reframeGestures ? " framing-frame-active" : ""}${reframeGestures && gesture.deferCarouselDrag ? " framing-frame-pan-x" : ""}${dragging && isActive ? " framing-frame-dragging" : ""}`}
@@ -1167,29 +1425,70 @@ function EditorImageCarousel({
           </>
         )}
       </div>
-      {onFocusSave && active && (
+      {(onFocusSave || (onReorder && images.length > 1)) && active && (
         <div className="editor-image-tools">
-          <span className="editor-image-tools-label">Frame photo {selected + 1}</span>
-          {onFitChange && (
+          <span className="editor-image-tools-label">
+            {onFocusSave ? `Frame photo ${selected + 1}` : `Photo ${selected + 1} of ${images.length}`}
+          </span>
+          {(onFitChange || (onReorder && images.length > 1)) && (
             <div className="editor-image-tools-actions">
-              <FramingFitToggle
-                fit={activeFit}
-                disabled={framingBusy}
-                onChange={(next) => {
-                  setImageFit(active, next);
-                  void onFitChange(active.id, next);
-                }}
-              />
+              {onFitChange && (
+                <FramingFitToggle
+                  fit={activeFit}
+                  disabled={framingBusy}
+                  onChange={(next) => {
+                    setImageFit(active, next);
+                    void onFitChange(active.id, next);
+                  }}
+                />
+              )}
+              {onReorder && images.length > 1 && (
+                <div className="editor-reorder-controls">
+                  <button
+                    type="button"
+                    className="framing-tool-control"
+                    disabled={imagesBusy || selected === 0}
+                    onClick={() => moveSelected(-1)}
+                  >
+                    <Icon name="arrow" size={16} /> Move earlier
+                  </button>
+                  <button
+                    type="button"
+                    className="framing-tool-control editor-reorder-later"
+                    disabled={imagesBusy || selected === images.length - 1}
+                    onClick={() => moveSelected(1)}
+                  >
+                    Move later <Icon name="arrow" size={16} />
+                  </button>
+                </div>
+              )}
             </div>
           )}
           <p className="form-hint">
-            {activeFit === "contain"
-              ? `The whole image is scaled to fit inside the frame at its original proportions (never enlarged past its file size).${framingBusy ? " Saving…" : ""}`
-              : canReframe
-                ? `Drag to recenter the crop. Full photo fits the entire image in the frame at original proportions.${framingBusy ? " Saving…" : ""}`
-                : "Full photo fits the entire image in the frame at original proportions."}
+            {onFocusSave
+              ? activeFit === "contain"
+                ? `The whole image is scaled to fit inside the frame at its original proportions (never enlarged past its file size).${framingBusy ? " Saving…" : ""}`
+                : canReframe
+                  ? `Drag to recenter the crop. Full photo fits the entire image in the frame at original proportions.${framingBusy ? " Saving…" : ""}`
+                  : "Full photo fits the entire image in the frame at original proportions."
+              : null}
+            {onReorder && images.length > 1
+              ? `${onFocusSave ? " " : ""}Drag the thumbnails below or use the buttons to change carousel order. The first photo is the cover.`
+              : null}
+            {imagesBusy ? " Updating photos…" : ""}
           </p>
         </div>
+      )}
+      {(onReorder || onRemove || onAdd) && (
+        <EditorPhotoStrip
+          images={images}
+          selectedId={active?.id}
+          onSelect={selectImage}
+          onReorder={onReorder}
+          onRemove={onRemove}
+          onAdd={onAdd}
+          busy={imagesBusy}
+        />
       )}
     </>
   );
@@ -1284,6 +1583,39 @@ function PreviewSiteBanner() {
   );
 }
 
+/** Feed cards show a single cover frame — full carousel only on the journal detail page (Safari memory). */
+function PostCardCover({
+  images,
+  linkedSlug,
+  postBase,
+}: {
+  images: Image[];
+  linkedSlug: string;
+  postBase: string;
+}) {
+  const cover = images[0];
+  if (!cover) return null;
+  const fullPhoto = isFullPhotoFit(cover);
+  return (
+    <div className="carousel post-card-cover">
+      <Link to={`${postBase}/${linkedSlug}`} aria-label="Open journal">
+        <div className={`carousel-slide photo-frame${fullPhoto ? " carousel-slide-contain" : ""}`}>
+          <CarouselPhoto
+            image={{ ...cover, url: imageFeedSrc(cover) }}
+            alt={cover.alt || "Journal cover photograph"}
+            loading="lazy"
+          />
+        </div>
+      </Link>
+      {images.length > 1 ? (
+        <span className="image-count" aria-hidden>
+          1 / {images.length}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
 function PostCard({
   post,
   profile,
@@ -1310,7 +1642,7 @@ function PostCard({
         </div>
       </header>
       {post.isDraft && <p className="draft-pill">Draft — not on live site</p>}
-      <Carousel images={post.images} linkedSlug={post.slug} postBase={site.postBase} />
+      <PostCardCover images={post.images} linkedSlug={post.slug} postBase={site.postBase} />
       <div className="post-copy">
         <div className="post-copy-text">
           <strong>{profile.username}</strong>
@@ -2965,7 +3297,11 @@ function AdminDashboard() {
         <div className="admin-post-list">
           {posts.map((post) => (
             <article key={post.id} className={post.isDraft ? "admin-post-draft" : ""}>
-              <img src={post.thumbnail} alt="" />
+              {post.thumbnail ? (
+                <img src={post.thumbnail} alt="" loading="lazy" decoding="async" />
+              ) : (
+                <div className="admin-post-thumb-placeholder" aria-hidden />
+              )}
               <div>
                 <strong>{post.placeName || "Untitled journal"}</strong>
                 {post.isDraft ? <span className="status-pill status-draft">Preview only</span> : <span className="status-pill status-live">Live</span>}
@@ -2995,10 +3331,14 @@ function AdminDashboard() {
   );
 }
 
+type DraftPhoto = { id: string; file: File; url: string; exif?: FileExif };
+
 function NewPost() {
   const navigate = useNavigate();
   const inputRef = useRef<HTMLInputElement>(null);
-  const [files, setFiles] = useState<File[]>([]);
+  const draftsRef = useRef<DraftPhoto[]>([]);
+  const [drafts, setDrafts] = useState<DraftPhoto[]>([]);
+  draftsRef.current = drafts;
   const [contentHtml, setContentHtml] = useState("");
   const [place, setPlace] = useState("");
   const [takenAt, setTakenAt] = useState("");
@@ -3012,40 +3352,70 @@ function NewPost() {
   const [tripId, setTripId] = useState("");
   const [chapterId, setChapterId] = useState("");
   const [albumId, setAlbumId] = useState("");
-  const [fileExif, setFileExif] = useState<FileExif[]>([]);
-  const previews = useMemo(() => files.map((file) => ({ file, url: URL.createObjectURL(file) })), [files]);
-  useEffect(() => () => previews.forEach((preview) => URL.revokeObjectURL(preview.url)), [previews]);
+  const draftImages = useMemo<Image[]>(
+    () =>
+      drafts.map((draft) => ({
+        id: draft.id,
+        url: draft.url,
+        hasLocationMetadata: draft.exif?.hasLocation,
+        hasDateMetadata: draft.exif?.hasDate,
+      })),
+    [drafts],
+  );
+
+  useEffect(() => () => {
+    draftsRef.current.forEach((draft) => URL.revokeObjectURL(draft.url));
+  }, []);
 
   useEffect(() => {
-    if (!files.length) {
-      setFileExif([]);
-      return;
-    }
+    const pending = drafts.filter((draft) => !draft.exif);
+    if (!pending.length) return;
     let cancelled = false;
     void (async () => {
-      const parsed = await Promise.all(files.map(readFileExif));
+      const parsed = await Promise.all(
+        pending.map(async (draft) => ({ id: draft.id, exif: await readFileExif(draft.file) })),
+      );
       if (cancelled) return;
-      setFileExif(parsed);
-      const withGps = parsed.find((item) => item.hasLocation && item.lat != null && item.lng != null);
+      setDrafts((current) =>
+        current.map((draft) => {
+          const found = parsed.find((item) => item.id === draft.id);
+          return found && !draft.exif ? { ...draft, exif: found.exif } : draft;
+        }),
+      );
+      const withGps = parsed.find((item) => item.exif.hasLocation && item.exif.lat != null && item.exif.lng != null);
       if (withGps) {
-        setLat((prev) => prev || String(withGps.lat));
-        setLng((prev) => prev || String(withGps.lng));
+        setLat((prev) => prev || String(withGps.exif.lat));
+        setLng((prev) => prev || String(withGps.exif.lng));
         try {
-          const name = await resolvePlaceName(withGps.lat!, withGps.lng!);
+          const name = await resolvePlaceName(withGps.exif.lat!, withGps.exif.lng!);
           if (!cancelled && name) setPlace((prev) => prev || name);
         } catch {
           /* place can be entered manually */
         }
       }
-      const withDate = parsed.find((item) => item.hasDate && item.takenAt);
-      if (withDate?.takenAt) {
-        setTakenAt((prev) => prev || new Date(withDate.takenAt!).toISOString().slice(0, 16));
+      const withDate = parsed.find((item) => item.exif.hasDate && item.exif.takenAt);
+      if (withDate?.exif.takenAt) {
+        setTakenAt((prev) => prev || new Date(withDate.exif.takenAt!).toISOString().slice(0, 16));
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [files]);
+  }, [drafts]);
+
+  const addDraftFiles = (fileList: FileList | null) => {
+    if (!fileList?.length) return;
+    setDrafts((current) => {
+      const remaining = 10 - current.length;
+      if (remaining <= 0) return current;
+      const added = Array.from(fileList).slice(0, remaining).map((file) => ({
+        id: crypto.randomUUID(),
+        file,
+        url: URL.createObjectURL(file),
+      }));
+      return [...current, ...added];
+    });
+  };
 
   const useMyLocation = () => {
     setLocating(true);
@@ -3062,10 +3432,10 @@ function NewPost() {
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!files.length) { setError("Choose at least one photo."); return; }
+    if (!drafts.length) { setError("Choose at least one photo."); return; }
     setBusy(true); setError("");
     const data = new FormData();
-    files.forEach((file) => data.append("images", file));
+    drafts.forEach((draft) => data.append("images", draft.file));
     data.append("contentHtml", contentHtml);
     // Older APIs only persist `caption`; store HTML there so formatting survives.
     data.append("caption", contentHtml || "");
@@ -3103,23 +3473,23 @@ function NewPost() {
       <header className="admin-title"><div><p className="eyebrow">Add to the archive</p><h1>New journal</h1></div></header>
       <form className="post-editor" onSubmit={submit}>
         <section className="upload-panel">
-          <input ref={inputRef} hidden multiple type="file" accept="image/jpeg,image/png,image/webp" onChange={(e) => setFiles(Array.from(e.target.files || []).slice(0, 10))} />
-          {previews.length ? (
-            <>
-              <div className="preview-main photo-frame">
-                <img src={previews[0]!.url} alt="Selected preview" />
-                {fileExif[0] && <PhotoMetadataOverlay flags={fileExif[0]} />}
-              </div>
-              <div className="preview-strip">
-                {previews.map(({ file, url }, index) => (
-                  <div className="photo-frame" key={file.name + index}>
-                    <img src={url} alt={`Selected ${index + 1}`} />
-                    {fileExif[index] && <PhotoMetadataOverlay flags={fileExif[index]!} />}
-                  </div>
-                ))}
-                <button type="button" onClick={() => inputRef.current?.click()}><Icon name="plus" /></button>
-              </div>
-            </>
+          <input
+            ref={inputRef}
+            hidden
+            multiple
+            type="file"
+            accept="image/jpeg,image/png,image/webp"
+            onChange={(e) => {
+              addDraftFiles(e.target.files);
+              e.currentTarget.value = "";
+            }}
+          />
+          {draftImages.length ? (
+            <EditorImageCarousel
+              images={draftImages}
+              onReorder={(imageIds) => setDrafts((current) => sortByIds(current, imageIds))}
+              onAdd={() => inputRef.current?.click()}
+            />
           ) : (
             <button type="button" className="drop-zone" onClick={() => inputRef.current?.click()}><Icon name="plus" size={28} /><strong>Select your photographs</strong><span>JPEG, PNG or WebP · up to 10 images</span></button>
           )}
@@ -3351,11 +3721,16 @@ function EditPost() {
   const [chapterId, setChapterId] = useState("");
   const [albumId, setAlbumId] = useState("");
   const addImagesRef = useRef<HTMLInputElement>(null);
+  const savedImagesRef = useRef<Image[]>([]);
+  const savedOrderRef = useRef("");
+  const reorderRequestRef = useRef(0);
   useEffect(() => {
     let cancelled = false;
     api<Post>(`/api/admin/posts/${slug}`)
       .then(async (loaded) => {
         if (cancelled) return;
+        savedImagesRef.current = loaded.images;
+        savedOrderRef.current = loaded.images.map((image) => image.id).join(",");
         setPost(loaded);
         setContentHtml(storyToEditorHtml(loaded));
         setChapterId(loaded.chapter?.id ?? "");
@@ -3505,11 +3880,37 @@ function EditPost() {
     setError("");
     try {
       const updated = await api<Post>(`/api/post-images/${imageId}`, { method: "DELETE" });
+      savedImagesRef.current = updated.images;
+      savedOrderRef.current = updated.images.map((image) => image.id).join(",");
       setPost(updated);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not remove photo");
     } finally {
       setImagesBusy(false);
+    }
+  };
+
+  const reorderImages = async (imageIds: string[], options?: ReorderOptions) => {
+    const nextImages = sortByIds(post.images, imageIds);
+    if (nextImages.length !== post.images.length) return;
+    setPost((current) => (current ? { ...current, images: sortByIds(current.images, imageIds) } : current));
+    if (options?.commit === false) return;
+    if (imageIds.join(",") === savedOrderRef.current) return;
+    const requestId = ++reorderRequestRef.current;
+    try {
+      const updated = await api<Post>(`/api/posts/${post.id}/images/order`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ imageIds }),
+      });
+      if (requestId !== reorderRequestRef.current) return;
+      savedImagesRef.current = updated.images;
+      savedOrderRef.current = updated.images.map((image) => image.id).join(",");
+      setPost(updated);
+    } catch (err) {
+      if (requestId !== reorderRequestRef.current) return;
+      setPost((current) => (current ? { ...current, images: savedImagesRef.current } : current));
+      setError(err instanceof Error ? err.message : "Could not reorder photos");
     }
   };
 
@@ -3527,6 +3928,8 @@ function EditPost() {
     setError("");
     try {
       const updated = await api<Post>(`/api/posts/${post.id}/images`, { method: "POST", body: data });
+      savedImagesRef.current = updated.images;
+      savedOrderRef.current = updated.images.map((image) => image.id).join(",");
       setPost(updated);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not add photos");
@@ -3583,32 +3986,13 @@ function EditPost() {
             onFocusSave={saveImageFocus}
             onFitChange={saveImageFit}
             framingBusy={framingBusy}
+            onReorder={reorderImages}
+            onRemove={(imageId) => void removeImage(imageId)}
+            onAdd={() => addImagesRef.current?.click()}
+            imagesBusy={imagesBusy}
           />
-          <div className="preview-strip editor-photo-strip">
-            {post.images.map((image, index) => (
-              <div className="photo-frame" key={image.id}>
-                <img src={image.url} alt={`Journal photo ${index + 1}`} />
-                {post.images.length > 1 && (
-                  <button
-                    type="button"
-                    className="strip-remove"
-                    disabled={imagesBusy}
-                    aria-label={`Remove photo ${index + 1}`}
-                    onClick={() => void removeImage(image.id)}
-                  >
-                    <Icon name="x" size={14} />
-                  </button>
-                )}
-              </div>
-            ))}
-            {post.images.length < 10 && (
-              <button type="button" disabled={imagesBusy} onClick={() => addImagesRef.current?.click()} aria-label="Add photos">
-                <Icon name="plus" />
-              </button>
-            )}
-          </div>
           <p className="form-hint">
-            Add or remove photos in the strip below (up to 10). Badges show embedded GPS or date metadata. Drag the main photo to change what is centered in the frame.
+            Add, remove, or reorder photos in the strip (up to 10). The first photo is the cover. Badges show embedded GPS or date metadata. Drag the main photo to change what is centered in the frame.
             {imagesBusy ? " Updating photos…" : ""}
           </p>
         </section>

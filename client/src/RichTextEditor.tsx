@@ -1,7 +1,7 @@
 import { useEditor, EditorContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Link from "@tiptap/extension-link";
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 
 type Props = {
   value: string;
@@ -44,10 +44,11 @@ function normalizeEditorHtml(html: string) {
 
 export function RichTextEditor({ value, onChange, placeholder, disabled }: Props) {
   const lastEmittedHtml = useRef(value || "");
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
 
-  const editor = useEditor({
-    immediatelyRender: false,
-    extensions: [
+  const extensions = useMemo(
+    () => [
       StarterKit.configure({
         heading: { levels: [2, 3] },
         code: false,
@@ -66,21 +67,30 @@ export function RichTextEditor({ value, onChange, placeholder, disabled }: Props
         },
       }),
     ],
-    content: value || "",
-    editable: !disabled,
-    editorProps: {
-      attributes: {
-        class: "rte-content rich-story detail-caption",
-        "aria-label": "Story",
-        ...(placeholder ? { "data-placeholder": placeholder } : {}),
+    [],
+  );
+
+  const editor = useEditor(
+    {
+      immediatelyRender: false,
+      extensions,
+      content: value || "",
+      editable: !disabled,
+      editorProps: {
+        attributes: {
+          class: "rte-content rich-story detail-caption",
+          "aria-label": "Story",
+          ...(placeholder ? { "data-placeholder": placeholder } : {}),
+        },
+      },
+      onUpdate: ({ editor: current }) => {
+        const html = current.isEmpty ? "" : normalizeEditorHtml(current.getHTML());
+        lastEmittedHtml.current = html;
+        onChangeRef.current(html);
       },
     },
-    onUpdate: ({ editor: current }) => {
-      const html = current.isEmpty ? "" : normalizeEditorHtml(current.getHTML());
-      lastEmittedHtml.current = html;
-      onChange(html);
-    },
-  });
+    [extensions],
+  );
 
   useEffect(() => {
     if (!editor) return;

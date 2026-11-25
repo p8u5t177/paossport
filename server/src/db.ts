@@ -210,6 +210,9 @@ export function getDb(scope: DataScope = "test") {
   if (!imageColNames.has("fit_mode")) {
     db.exec(`ALTER TABLE post_image ADD COLUMN fit_mode TEXT NOT NULL DEFAULT 'cover'`);
   }
+  if (!imageColNames.has("feed_public_url")) {
+    db.exec(`ALTER TABLE post_image ADD COLUMN feed_public_url TEXT`);
+  }
 
   const albumCols = db.prepare("PRAGMA table_info(album)").all() as { name: string }[];
   const albumColNames = new Set(albumCols.map((col) => col.name));

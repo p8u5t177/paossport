@@ -2,12 +2,30 @@ import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
 import { normalizeStoryInput } from "./rich-text.js";
+import type { DataScope } from "./data-scope.js";
 
 const dataDir = path.resolve(process.env.DATA_DIR ?? path.join(process.cwd(), "..", "data"));
-const dbPath = process.env.DATABASE_PATH ?? path.join(dataDir, "app.db");
+const testDbPath = process.env.DATABASE_PATH?.trim() || path.join(dataDir, "app.db");
+const productionDbPath =
+  process.env.DATABASE_PATH_PRODUCTION?.trim() || path.join(dataDir, "production.db");
 
-export function getDb() {
-  fs.mkdirSync(dataDir, { recursive: true });
+const openDatabases = new Map<string, Database.Database>();
+
+export function dataDirectory() {
+  return dataDir;
+}
+
+function resolveDbPath(scope: DataScope): string {
+  if (scope === "production") return productionDbPath;
+  return testDbPath;
+}
+
+export function getDb(scope: DataScope = "test") {
+  const dbPath = resolveDbPath(scope);
+  const existing = openDatabases.get(dbPath);
+  if (existing) return existing;
+
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new Database(dbPath);
   db.pragma("foreign_keys = ON");
   db.pragma("journal_mode = WAL");
@@ -199,6 +217,7 @@ export function getDb() {
     db.exec(`ALTER TABLE album ADD COLUMN is_featured INTEGER NOT NULL DEFAULT 0`);
   }
 
+  openDatabases.set(dbPath, db);
   return db;
 }
 

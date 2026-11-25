@@ -1,4 +1,13 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import useEmblaCarousel from "embla-carousel-react";
 import exifr from "exifr";
 import {
@@ -192,7 +201,11 @@ const previewSite: SiteMode = {
 
 const ALL_CHAPTERS = "all";
 type FeedViewMode = "timeline" | "grouped";
+type FeedTimelineOrder = "newest" | "oldest";
 type TripFeedPrefs = { view: FeedViewMode; chapterId: string };
+
+const timelineDetailLabel = (order: FeedTimelineOrder) =>
+  `Timeline · ${order === "newest" ? "newest" : "oldest"} first`;
 
 const defaultTripFeedPrefs = (): TripFeedPrefs => ({ view: "timeline", chapterId: ALL_CHAPTERS });
 type Profile = {
@@ -210,8 +223,8 @@ type Profile = {
 const api = async <T,>(url: string, options?: RequestInit): Promise<T> => {
   const response = await fetch(url, { credentials: "include", ...options });
   if (!response.ok) {
-    const payload = await response.json().catch(() => ({ error: "Request failed" }));
-    throw new Error(payload.error ?? "Request failed");
+    const payload = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new Error(payload.error ?? `Request failed (${response.status})`);
   }
   return response.json();
 };
@@ -467,14 +480,18 @@ function FeedViewRuleMenu({
   view,
   detailLabel,
   scope,
+  timelineOrder,
   onViewChange,
+  onTimelineOrderToggle,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   view: FeedViewMode;
   detailLabel: string;
   scope: "collection" | "trip";
+  timelineOrder: FeedTimelineOrder;
   onViewChange: (view: FeedViewMode) => void;
+  onTimelineOrderToggle: () => void;
 }) {
   const anchorRef = useRef<HTMLDivElement>(null);
 
@@ -498,6 +515,14 @@ function FeedViewRuleMenu({
   const pickView = (next: FeedViewMode) => {
     onViewChange(next);
     onOpenChange(false);
+  };
+
+  const pickTimeline = () => {
+    if (view === "timeline") {
+      onTimelineOrderToggle();
+      return;
+    }
+    pickView("timeline");
   };
 
   return (
@@ -538,10 +563,24 @@ function FeedViewRuleMenu({
           <button
             type="button"
             className={`feed-view-option${view === "timeline" ? " feed-view-option-selected" : ""}`}
-            onClick={() => pickView("timeline")}
+            onClick={pickTimeline}
+            aria-label={
+              view === "timeline"
+                ? `Timeline, ${timelineOrder === "newest" ? "newest" : "oldest"} first. Activate to show ${
+                    timelineOrder === "newest" ? "oldest" : "newest"
+                  } first`
+                : "Timeline, all entries"
+            }
           >
             <span className="feed-view-option-title">Timeline</span>
-            <span className="feed-view-option-hint">All entries, newest first</span>
+            <span className="feed-view-option-hint">
+              All entries, {timelineOrder === "newest" ? "newest" : "oldest"} first
+            </span>
+            {view === "timeline" ? (
+              <span className="feed-view-option-toggle-hint">
+                Click again for {timelineOrder === "newest" ? "oldest" : "newest"} first
+              </span>
+            ) : null}
             {view === "timeline" ? <span className="feed-view-option-check" aria-hidden>✓</span> : null}
           </button>
           <button
@@ -799,11 +838,19 @@ function Loading() {
   );
 }
 
-function ErrorState({ message, retry }: { message: string; retry?: () => void }) {
+function ErrorState({
+  message,
+  retry,
+  title = "We couldn't load the journal.",
+}: {
+  message: string;
+  retry?: () => void;
+  title?: string;
+}) {
   return (
     <div className="state-card">
       <p className="eyebrow">Something drifted off course</p>
-      <h2>We couldn't load the journal.</h2>
+      <h2>{title}</h2>
       <p>{message}</p>
       {retry && <button onClick={retry}>Try again</button>}
     </div>
@@ -1452,6 +1499,8 @@ function JournalFeed({ site }: { site: SiteMode }) {
   const [selectedTripId, setSelectedTripId] = useState<string | null>(null);
   const [tripFeedPrefs, setTripFeedPrefs] = useState<Record<string, TripFeedPrefs>>({});
   const [collectionFeedViews, setCollectionFeedViews] = useState<Record<string, FeedViewMode>>({});
+  const [collectionTimelineOrders, setCollectionTimelineOrders] = useState<Record<string, FeedTimelineOrder>>({});
+  const [feedTimelineOrder, setFeedTimelineOrder] = useState<FeedTimelineOrder>("newest");
   const [feedViewMenuOpen, setFeedViewMenuOpen] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -1516,6 +1565,14 @@ function JournalFeed({ site }: { site: SiteMode }) {
   const tripFeedView = activeTripPrefs.view;
   const chapterId = activeTripPrefs.chapterId;
   const collectionFeedView = activeAlbum ? (collectionFeedViews[activeAlbum.id] ?? "timeline") : "timeline";
+  const inCollectionTimeline = Boolean(tripBrowse && activeAlbum && !activeTrip);
+
+  const effectiveTimelineOrder = useMemo((): FeedTimelineOrder => {
+    if (inCollectionTimeline && activeAlbum) {
+      return collectionTimelineOrders[activeAlbum.id] ?? "oldest";
+    }
+    return feedTimelineOrder;
+  }, [activeAlbum, collectionTimelineOrders, feedTimelineOrder, inCollectionTimeline]);
 
   const tripPosts = useMemo(() => {
     if (!selectedTripId) return [];
@@ -1560,14 +1617,16 @@ function JournalFeed({ site }: { site: SiteMode }) {
   const feedRuleDetail = useMemo(() => {
     if (!tripBrowse) return null;
     if (activeTrip) {
-      if (tripFeedView === "timeline") return "Timeline · newest first";
+      if (tripFeedView === "timeline") return timelineDetailLabel(effectiveTimelineOrder);
       if (chapterId === ALL_CHAPTERS) return "By chapter · all entries";
       const chapter = activeTrip.chapters.find((item) => item.id === chapterId);
       return chapter?.title ?? "By chapter";
     }
-    if (activeAlbum) return collectionFeedView === "timeline" ? "Timeline · newest first" : "By trip";
-    return "Timeline · newest first";
-  }, [activeAlbum, activeTrip, chapterId, collectionFeedView, tripBrowse, tripFeedView]);
+    if (activeAlbum) {
+      return collectionFeedView === "timeline" ? timelineDetailLabel(effectiveTimelineOrder) : "By trip";
+    }
+    return timelineDetailLabel(effectiveTimelineOrder);
+  }, [activeAlbum, activeTrip, chapterId, collectionFeedView, effectiveTimelineOrder, tripBrowse, tripFeedView]);
 
   useEffect(() => {
     setFeedViewMenuOpen(false);
@@ -1591,6 +1650,17 @@ function JournalFeed({ site }: { site: SiteMode }) {
     setSelectedTripId(null);
   };
 
+  const onTimelineOrderToggle = () => {
+    if (inCollectionTimeline && activeAlbum) {
+      setCollectionTimelineOrders((current) => {
+        const order = current[activeAlbum.id] ?? "oldest";
+        return { ...current, [activeAlbum.id]: order === "newest" ? "oldest" : "newest" };
+      });
+      return;
+    }
+    setFeedTimelineOrder((order) => (order === "newest" ? "oldest" : "newest"));
+  };
+
   const onFeedViewChange = (view: FeedViewMode) => {
     if (selectedTripId) {
       patchTripPrefs(selectedTripId, {
@@ -1610,6 +1680,30 @@ function JournalFeed({ site }: { site: SiteMode }) {
   };
 
   const canGroupByChapter = Boolean(activeTrip && activeTrip.chapters.length > 0);
+  const canGroupCollection = Boolean(activeAlbum && activeAlbum.trips.length > 1);
+  const showTripFeed = tripBrowse && Boolean(activeTrip);
+  const showCollectionFeed = tripBrowse && Boolean(activeAlbum) && !activeTrip;
+
+  const timelineFeedRaw = useMemo(() => {
+    if (showTripFeed) return tripPosts;
+    if (showCollectionFeed) return collectionPosts;
+    return posts;
+  }, [collectionPosts, posts, showCollectionFeed, showTripFeed, tripPosts]);
+
+  const timelineFeed = useMemo(() => {
+    if (effectiveTimelineOrder === "newest") return timelineFeedRaw;
+    return [...timelineFeedRaw].sort(
+      (a, b) => new Date(a.publishedAt).getTime() - new Date(b.publishedAt).getTime(),
+    );
+  }, [effectiveTimelineOrder, timelineFeedRaw]);
+
+  const showFeedViewMenu =
+    Boolean(feedRuleDetail) &&
+    ((showTripFeed && canGroupByChapter) || (showCollectionFeed && canGroupCollection));
+  const showTimelineDetailToggle = Boolean(feedRuleDetail?.startsWith("Timeline")) && !showFeedViewMenu;
+  const showGroupedTripFeed = showTripFeed && canGroupByChapter && tripFeedView === "grouped";
+  const showGroupedCollectionFeed = showCollectionFeed && collectionFeedView === "grouped";
+  const activeFeedView = showTripFeed ? tripFeedView : collectionFeedView;
 
   // oxlint-disable-next-line react/set-state-in-effect
   useEffect(() => {
@@ -1619,14 +1713,6 @@ function JournalFeed({ site }: { site: SiteMode }) {
 
   if (loading) return <Loading />;
   if (error || !profile) return <ErrorState message={error} retry={load} />;
-
-  const showTripFeed = tripBrowse && Boolean(activeTrip);
-  const showCollectionFeed = tripBrowse && Boolean(activeAlbum) && !activeTrip;
-  const timelineFeed = showTripFeed ? tripPosts : showCollectionFeed ? collectionPosts : posts;
-  const showGroupedTripFeed = showTripFeed && canGroupByChapter && tripFeedView === "grouped";
-  const showGroupedCollectionFeed = showCollectionFeed && collectionFeedView === "grouped";
-  const canGroupCollection = Boolean(activeAlbum && activeAlbum.trips.length > 1);
-  const activeFeedView = showTripFeed ? tripFeedView : collectionFeedView;
 
   return (
     <>
@@ -1687,15 +1773,28 @@ function JournalFeed({ site }: { site: SiteMode }) {
           ) : null}
           <span>{feedRule}</span>
         </div>
-        {((showTripFeed && canGroupByChapter) || (showCollectionFeed && canGroupCollection)) && feedRuleDetail ? (
+        {showFeedViewMenu && feedRuleDetail ? (
           <FeedViewRuleMenu
             open={feedViewMenuOpen}
             onOpenChange={setFeedViewMenuOpen}
             view={activeFeedView}
             detailLabel={feedRuleDetail}
             scope={showCollectionFeed ? "collection" : "trip"}
+            timelineOrder={effectiveTimelineOrder}
             onViewChange={onFeedViewChange}
+            onTimelineOrderToggle={onTimelineOrderToggle}
           />
+        ) : showTimelineDetailToggle && feedRuleDetail ? (
+          <button
+            type="button"
+            className="feed-rule-detail feed-rule-detail-toggle"
+            onClick={onTimelineOrderToggle}
+            aria-label={`${feedRuleDetail}. Activate to show ${
+              effectiveTimelineOrder === "newest" ? "oldest" : "newest"
+            } first`}
+          >
+            {feedRuleDetail}
+          </button>
         ) : feedRuleDetail ? (
           <span className="feed-rule-detail">{feedRuleDetail}</span>
         ) : (
@@ -2302,6 +2401,284 @@ function JourneyOrganizationFields({
   );
 }
 
+type AdminDataEnvironment = {
+  adminScope: "test" | "production";
+  publicScope: "test" | "production";
+};
+
+function normalizeDataEnvironment(
+  data: Partial<AdminDataEnvironment> & { scope?: "test" | "production" },
+): AdminDataEnvironment {
+  return {
+    adminScope: data.adminScope ?? data.scope ?? "test",
+    publicScope: data.publicScope ?? "test",
+  };
+}
+
+async function fetchDataEnvironment(): Promise<{
+  env: AdminDataEnvironment;
+  needsDeploy: boolean;
+}> {
+  const response = await fetch("/api/admin/data-environment", { credentials: "include" });
+  if (response.status === 404) {
+    return {
+      env: { adminScope: "test", publicScope: "test" },
+      needsDeploy: true,
+    };
+  }
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new Error(payload.error ?? `Request failed (${response.status})`);
+  }
+  const data = (await response.json()) as Partial<AdminDataEnvironment> & { scope?: "test" | "production" };
+  return { env: normalizeDataEnvironment(data), needsDeploy: false };
+}
+
+const AdminDataEnvironmentContext = createContext<{
+  env: AdminDataEnvironment | null;
+  refresh: () => Promise<void>;
+  updateConfig: (patch: Partial<AdminDataEnvironment>) => Promise<AdminDataEnvironment>;
+  reloadKey: string;
+} | null>(null);
+
+function useAdminDataEnvironment() {
+  return useContext(AdminDataEnvironmentContext);
+}
+
+function DataScopeToggle({
+  label,
+  value,
+  onChange,
+  disabled,
+}: {
+  label: string;
+  value: "test" | "production";
+  onChange: (scope: "test" | "production") => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div className="admin-settings-row">
+      <p className="admin-settings-row-label">{label}</p>
+      <div className="admin-data-scope-options" role="group" aria-label={label}>
+        {(["test", "production"] as const).map((scope) => (
+          <button
+            key={scope}
+            type="button"
+            className={value === scope ? "active" : ""}
+            aria-pressed={value === scope}
+            disabled={disabled}
+            onClick={() => onChange(scope)}
+          >
+            {scope === "test" ? "Test" : "Production"}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AdminSettings() {
+  const ctx = useAdminDataEnvironment();
+  const [env, setEnv] = useState<AdminDataEnvironment | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [needsDeploy, setNeedsDeploy] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setLoadError("");
+    setNeedsDeploy(false);
+    try {
+      const result = await fetchDataEnvironment();
+      setEnv(result.env);
+      setNeedsDeploy(result.needsDeploy);
+    } catch (err) {
+      setEnv(null);
+      setLoadError(err instanceof Error ? err.message : "Could not load settings");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (ctx?.env) {
+      setEnv(ctx.env);
+      setLoading(false);
+      return;
+    }
+    void load();
+  }, [ctx?.env, load]);
+
+  const save = async (patch: Partial<AdminDataEnvironment>) => {
+    if (needsDeploy) {
+      setError("Redeploy the app (or run npm run dev locally) before saving database settings.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      const data = ctx
+        ? await ctx.updateConfig(patch)
+        : normalizeDataEnvironment(
+            await api<Partial<AdminDataEnvironment> & { scope?: "test" | "production" }>(
+              "/api/admin/data-environment",
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(patch),
+              },
+            ),
+          );
+      setEnv(data);
+      setMessage("Settings saved.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save settings");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const syncProfile = async () => {
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      await api("/api/admin/data-environment/sync-profile", { method: "POST" });
+      setMessage("Profile copied from test to production.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not sync profile");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <main className="admin-main">
+        <p className="eyebrow">Configuration</p>
+        <h1 className="admin-settings-loading">Loading settings…</h1>
+      </main>
+    );
+  }
+
+  if (loadError || !env) {
+    return (
+      <main className="admin-main">
+        <ErrorState
+          title="Settings are unavailable."
+          message={
+            loadError?.includes("401") || loadError?.toLowerCase().includes("unauthorized")
+              ? "Sign in again from Admin, then retry."
+              : loadError ||
+                "Use npm run dev (local API + UI), or redeploy test so the server includes the settings API."
+          }
+          retry={() => void load()}
+        />
+      </main>
+    );
+  }
+
+  return (
+    <main className="admin-main">
+      <header className="admin-title">
+        <div>
+          <p className="eyebrow">Configuration</p>
+          <h1>Settings</h1>
+        </div>
+      </header>
+      <section className="admin-settings-card">
+        {needsDeploy && (
+          <p className="form-error">
+            This UI is running against a server that has not been redeployed yet, so settings cannot be saved. Run{" "}
+            <code>npm run dev</code> locally, or redeploy Coolify test with the latest commit.
+          </p>
+        )}
+        <p className="form-hint">
+          Test content lives in <code>app.db</code>; production lives in <code>production.db</code> on the same
+          volume. These settings persist across deploys.
+        </p>
+        <DataScopeToggle
+          label="Admin edits"
+          value={env.adminScope}
+          disabled={busy || needsDeploy}
+          onChange={(adminScope) => void save({ adminScope })}
+        />
+        <DataScopeToggle
+          label="Live site shows"
+          value={env.publicScope}
+          disabled={busy || needsDeploy}
+          onChange={(publicScope) => void save({ publicScope })}
+        />
+        <div className="admin-settings-actions">
+          <button
+            type="button"
+            className="primary-button"
+            disabled={busy || needsDeploy}
+            onClick={() => void syncProfile()}
+          >
+            Copy profile test → production
+          </button>
+        </div>
+        {message && <p className="form-hint">{message}</p>}
+        {error && <p className="form-error">{error}</p>}
+      </section>
+    </main>
+  );
+}
+
+function AdminDataEnvironmentProvider({ children }: { children: React.ReactNode }) {
+  const [env, setEnv] = useState<AdminDataEnvironment | null>(null);
+  const [reloadKey, setReloadKey] = useState("default");
+
+  const refresh = useCallback(async () => {
+    const data = normalizeDataEnvironment(
+      await api<Partial<AdminDataEnvironment> & { scope?: "test" | "production" }>(
+        "/api/admin/data-environment",
+      ),
+    );
+    setEnv(data);
+    setReloadKey(data.adminScope);
+  }, []);
+
+  useEffect(() => {
+    void refresh().catch(() => setEnv(null));
+  }, [refresh]);
+
+  const updateConfig = useCallback(
+    async (patch: Partial<AdminDataEnvironment>) => {
+      const data = normalizeDataEnvironment(
+        await api<Partial<AdminDataEnvironment> & { scope?: "test" | "production" }>(
+          "/api/admin/data-environment",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(patch),
+          },
+        ),
+      );
+      setEnv(data);
+      setReloadKey(data.adminScope);
+      return data;
+    },
+    [],
+  );
+
+  const contextValue = useMemo(
+    () => ({ env, refresh, updateConfig, reloadKey }),
+    [env, refresh, updateConfig, reloadKey],
+  );
+
+  return (
+    <AdminDataEnvironmentContext.Provider value={contextValue}>
+      {children}
+    </AdminDataEnvironmentContext.Provider>
+  );
+}
+
 function AdminNavLinks({ onNavigate }: { onNavigate?: () => void }) {
   return (
     <>
@@ -2317,6 +2694,9 @@ function AdminNavLinks({ onNavigate }: { onNavigate?: () => void }) {
       <Link to="/admin/profile" onClick={onNavigate}>
         Profile
       </Link>
+      <Link to="/admin/settings" onClick={onNavigate}>
+        Settings
+      </Link>
       <a href="/" target="_blank" rel="noreferrer" onClick={onNavigate}>
         Main site
       </a>
@@ -2324,7 +2704,12 @@ function AdminNavLinks({ onNavigate }: { onNavigate?: () => void }) {
   );
 }
 
-function AdminLayout() {
+function AdminLayoutOutlet() {
+  const ctx = useAdminDataEnvironment();
+  return <Outlet key={ctx?.reloadKey ?? "default"} />;
+}
+
+function AdminLayoutShell() {
   const navigate = useNavigate();
   const location = useLocation();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -2410,8 +2795,16 @@ function AdminLayout() {
           <Icon name="plus" />
         </Link>
       </div>
-      <Outlet />
+      <AdminLayoutOutlet />
     </div>
+  );
+}
+
+function AdminLayout() {
+  return (
+    <AdminDataEnvironmentProvider>
+      <AdminLayoutShell />
+    </AdminDataEnvironmentProvider>
   );
 }
 
@@ -3271,6 +3664,7 @@ export default function App() {
           <Route path="/admin/posts/:slug/edit" element={<EditPost />} />
           <Route path="/admin/albums" element={<AdminAlbums />} />
           <Route path="/admin/profile" element={<ProfileEditor />} />
+          <Route path="/admin/settings" element={<AdminSettings />} />
         </Route>
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

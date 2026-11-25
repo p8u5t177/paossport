@@ -7,7 +7,8 @@
     "dev:test": "DEV_API_ORIGIN=https://test-paooffline.wanderlustportal.com npm run dev -w client",
     "build": "npm run build -w client && npm run build -w server",
     "start": "npm run start -w server",
-    "seed": "npm run seed -w server"
+    "seed": "npm run seed -w server",
+    "init-production-db": "npm run init-production-db -w server"
   },
   "workspaces": [
     "client",

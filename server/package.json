@@ -6,7 +6,8 @@
     "dev": "NODE_ENV=development tsx watch src/index.ts",
     "build": "tsc",
     "start": "NODE_ENV=production node dist/index.js",
-    "seed": "tsx src/seed.ts"
+    "seed": "tsx src/seed.ts",
+    "init-production-db": "tsx src/init-production-db.ts"
   },
   "dependencies": {
     "better-sqlite3": "^11.8.1",

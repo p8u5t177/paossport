@@ -8,6 +8,14 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { v4 as uuid } from "uuid";
 import { getDb } from "./db.js";
+import { getAppConfig, loadAppConfig, updateAppConfig } from "./app-config.js";
+import { copyProfileToProduction } from "./copy-profile.js";
+import {
+  activeDb,
+  attachAdminDb,
+  attachPreviewDb,
+  attachPublicDb,
+} from "./request-context.js";
 import {
   clearSessionCookie,
   createSession,
@@ -40,9 +48,11 @@ function adminSecret() {
 }
 const clientDist = path.resolve(__dirname, "../../client/dist");
 
-const db = getDb();
+const sessionDb = getDb("test");
+loadAppConfig(sessionDb);
 ensureMediaDirs();
-void reconcileImageDimensions(db);
+void reconcileImageDimensions(sessionDb);
+void reconcileImageDimensions(getDb("production"));
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -59,12 +69,10 @@ app.use("/media", express.static(MEDIA_ROOT, { maxAge: "7d" }));
 
 function mapChapter(chapterId: string | null | undefined) {
   if (!chapterId) return undefined;
-  const chapter = db
-    .prepare("SELECT id, trip_id, slug, title FROM chapter WHERE id = ?")
+  const chapter = activeDb().prepare("SELECT id, trip_id, slug, title FROM chapter WHERE id = ?")
     .get(chapterId) as { id: string; trip_id: string; slug: string; title: string } | undefined;
   if (!chapter) return undefined;
-  const trip = db
-    .prepare("SELECT id, slug, title FROM trip WHERE id = ?")
+  const trip = activeDb().prepare("SELECT id, slug, title FROM trip WHERE id = ?")
     .get(chapter.trip_id) as { id: string; slug: string; title: string } | undefined;
   if (!trip) return undefined;
   return {
@@ -88,7 +96,7 @@ function resolveChapterId(raw: unknown): { ok: true; chapterId: string | null } 
   }
   const id = String(raw).trim();
   if (!id) return { ok: true, chapterId: null };
-  const row = db.prepare("SELECT id FROM chapter WHERE id = ?").get(id);
+  const row = activeDb().prepare("SELECT id FROM chapter WHERE id = ?").get(id);
   if (!row) return { ok: false };
   return { ok: true, chapterId: id };
 }
@@ -99,15 +107,14 @@ function resolveTripId(raw: unknown): { ok: true; tripId: string | null } | { ok
   }
   const id = String(raw).trim();
   if (!id) return { ok: true, tripId: null };
-  const row = db.prepare("SELECT id FROM trip WHERE id = ?").get(id);
+  const row = activeDb().prepare("SELECT id FROM trip WHERE id = ?").get(id);
   if (!row) return { ok: false };
   return { ok: true, tripId: id };
 }
 
 function mapTrip(tripId: string | null | undefined) {
   if (!tripId) return undefined;
-  const trip = db
-    .prepare("SELECT id, slug, title FROM trip WHERE id = ?")
+  const trip = activeDb().prepare("SELECT id, slug, title FROM trip WHERE id = ?")
     .get(tripId) as { id: string; slug: string; title: string } | undefined;
   if (!trip) return undefined;
   return { id: trip.id, slug: trip.slug, title: trip.title };
@@ -158,8 +165,7 @@ function resolvePostOrganization(
   let tripId = tripResolved.tripId;
 
   if (chapterId) {
-    const chapter = db
-      .prepare("SELECT trip_id FROM chapter WHERE id = ?")
+    const chapter = activeDb().prepare("SELECT trip_id FROM chapter WHERE id = ?")
       .get(chapterId) as { trip_id: string } | undefined;
     if (!chapter) return { ok: false, error: "Journey not found" };
     if (tripId && tripId !== chapter.trip_id) {
@@ -187,8 +193,7 @@ function mapPost(
     lng: number | null;
   },
 ) {
-  const images = db
-    .prepare(
+  const images = activeDb().prepare(
       `SELECT id, sort_order, storage_key, public_url, width, height, alt, has_location_metadata, has_date_metadata, focus_x, focus_y, fit_mode
        FROM post_image WHERE post_id = ? ORDER BY sort_order`,
     )
@@ -243,10 +248,14 @@ app.get("/api/health", (_req, res) => {
 
 const geocodeLimiter = rateLimit({ windowMs: 60 * 1000, max: 30 });
 
-app.get("/api/profile", (_req, res) => {
-  const profile = db.prepare("SELECT * FROM profile WHERE id = 1").get() as ProfileRow;
-  const links = db
-    .prepare("SELECT label, href FROM profile_link WHERE profile_id = 1 ORDER BY sort_order")
+const attachAdmin = attachAdminDb(sessionDb);
+const admin = [requireAdmin(sessionDb), attachAdmin];
+const publicDb = attachPublicDb();
+const previewDb = attachPreviewDb(sessionDb);
+
+app.get("/api/profile", publicDb, (_req, res) => {
+  const profile = activeDb().prepare("SELECT * FROM profile WHERE id = 1").get() as ProfileRow;
+  const links = activeDb().prepare("SELECT label, href FROM profile_link WHERE profile_id = 1 ORDER BY sort_order")
     .all() as { label: string; href: string }[];
   res.json({
     displayName: profile.display_name,
@@ -263,21 +272,18 @@ app.get("/api/profile", (_req, res) => {
 
 function listPublicPosts(limit: number, cursor?: string) {
   if (cursor) {
-    return db
-      .prepare(
+    return activeDb().prepare(
         `SELECT * FROM post WHERE is_draft = 0 AND published_at < ? ORDER BY published_at DESC LIMIT ?`,
       )
       .all(cursor, limit);
   }
-  return db
-    .prepare(`SELECT * FROM post WHERE is_draft = 0 ORDER BY published_at DESC LIMIT ?`)
+  return activeDb().prepare(`SELECT * FROM post WHERE is_draft = 0 ORDER BY published_at DESC LIMIT ?`)
     .all(limit);
 }
 
 function listPreviewPosts(limit: number, cursor?: string) {
   if (cursor) {
-    return db
-      .prepare(
+    return activeDb().prepare(
         `SELECT * FROM post
          WHERE COALESCE(published_at, created_at) < ?
          ORDER BY is_draft DESC, COALESCE(published_at, created_at) DESC
@@ -285,8 +291,7 @@ function listPreviewPosts(limit: number, cursor?: string) {
       )
       .all(cursor, limit);
   }
-  return db
-    .prepare(
+  return activeDb().prepare(
       `SELECT * FROM post
        ORDER BY is_draft DESC, COALESCE(published_at, created_at) DESC
        LIMIT ?`,
@@ -296,8 +301,7 @@ function listPreviewPosts(limit: number, cursor?: string) {
 
 function feedTripIdsWithPosts(includeDrafts: boolean): Set<string> {
   const draftClause = includeDrafts ? "1 = 1" : "p.is_draft = 0";
-  const rows = db
-    .prepare(
+  const rows = activeDb().prepare(
       `SELECT DISTINCT trip_id FROM (
          SELECT p.trip_id AS trip_id FROM post p WHERE p.trip_id IS NOT NULL AND ${draftClause}
          UNION
@@ -311,8 +315,7 @@ function feedTripIdsWithPosts(includeDrafts: boolean): Set<string> {
 }
 
 function mapFeedTrip(tripId: string, includeDrafts: boolean) {
-  const trip = db
-    .prepare(
+  const trip = activeDb().prepare(
       `SELECT id, slug, title, from_place_name, from_lat, from_lng,
               arrived_place_name, arrived_lat, arrived_lng
        FROM trip WHERE id = ?`,
@@ -322,8 +325,7 @@ function mapFeedTrip(tripId: string, includeDrafts: boolean) {
     | undefined;
   if (!trip) return undefined;
   const draftClause = includeDrafts ? "1 = 1" : "p.is_draft = 0";
-  const chapters = db
-    .prepare(
+  const chapters = activeDb().prepare(
       `SELECT DISTINCT c.id, c.slug, c.title, c.sort_order
        FROM chapter c
        INNER JOIN post p ON p.chapter_id = c.id AND ${draftClause}
@@ -345,24 +347,23 @@ function mapFeedTrip(tripId: string, includeDrafts: boolean) {
 }
 
 function tripAlbumId(tripId: string): string | null {
-  const row = db.prepare(`SELECT album_id FROM album_trip WHERE trip_id = ?`).get(tripId) as
+  const row = activeDb().prepare(`SELECT album_id FROM album_trip WHERE trip_id = ?`).get(tripId) as
     | { album_id: string }
     | undefined;
   return row?.album_id ?? null;
 }
 
 function setTripAlbum(tripId: string, albumId: string | null) {
-  db.prepare(`DELETE FROM album_trip WHERE trip_id = ?`).run(tripId);
+  activeDb().prepare(`DELETE FROM album_trip WHERE trip_id = ?`).run(tripId);
   if (!albumId) return;
-  const album = db.prepare(`SELECT id FROM album WHERE id = ?`).get(albumId);
+  const album = activeDb().prepare(`SELECT id FROM album WHERE id = ?`).get(albumId);
   if (!album) return;
   const sortOrder =
     (
-      db
-        .prepare(`SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM album_trip WHERE album_id = ?`)
+      activeDb().prepare(`SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM album_trip WHERE album_id = ?`)
         .get(albumId) as { next_order: number }
     ).next_order ?? 0;
-  db.prepare(`INSERT INTO album_trip (album_id, trip_id, sort_order) VALUES (?, ?, ?)`).run(
+  activeDb().prepare(`INSERT INTO album_trip (album_id, trip_id, sort_order) VALUES (?, ?, ?)`).run(
     albumId,
     tripId,
     sortOrder,
@@ -371,13 +372,12 @@ function setTripAlbum(tripId: string, albumId: string | null) {
 
 function listFeedTrips(includeDrafts: boolean) {
   const tripIds = feedTripIdsWithPosts(includeDrafts);
-  const albums = db
-    .prepare(
+  const albums = activeDb().prepare(
       `SELECT id, slug, title, sort_order, is_featured FROM album ORDER BY sort_order, title COLLATE NOCASE`,
     )
     .all() as Array<{ id: string; slug: string; title: string; sort_order: number; is_featured: number }>;
 
-  const albumTripsStmt = db.prepare(
+  const albumTripsStmt = activeDb().prepare(
     `SELECT t.id AS trip_id, at.album_id, at.sort_order
      FROM album_trip at
      INNER JOIN trip t ON t.id = at.trip_id
@@ -406,8 +406,7 @@ function listFeedTrips(includeDrafts: boolean) {
 
   const flatTrips = [...tripIds]
     .map((id) => {
-      const row = db
-        .prepare(`SELECT id, slug, title, sort_order FROM trip WHERE id = ?`)
+      const row = activeDb().prepare(`SELECT id, slug, title, sort_order FROM trip WHERE id = ?`)
         .get(id) as { id: string; slug: string; title: string; sort_order: number } | undefined;
       if (!row) return undefined;
       const mapped = mapFeedTrip(row.id, includeDrafts);
@@ -424,15 +423,15 @@ function listFeedTrips(includeDrafts: boolean) {
   return { albums: feedAlbums, trips: flatTrips };
 }
 
-app.get("/api/trips", (_req, res) => {
+app.get("/api/trips", publicDb, (_req, res) => {
   res.json(listFeedTrips(false));
 });
 
-app.get("/api/preview/trips", (_req, res) => {
+app.get("/api/preview/trips", previewDb, (_req, res) => {
   res.json(listFeedTrips(true));
 });
 
-app.get("/api/posts", (req, res) => {
+app.get("/api/posts", publicDb, (req, res) => {
   const limit = Math.min(Number(req.query.limit ?? 12), 50);
   const cursor = req.query.cursor as string | undefined;
   const rows = listPublicPosts(limit, cursor);
@@ -442,7 +441,7 @@ app.get("/api/posts", (req, res) => {
   res.json({ posts, nextCursor });
 });
 
-app.get("/api/preview/posts", (req, res) => {
+app.get("/api/preview/posts", previewDb, (req, res) => {
   const limit = Math.min(Number(req.query.limit ?? 12), 50);
   const cursor = req.query.cursor as string | undefined;
   const rows = listPreviewPosts(limit, cursor);
@@ -455,9 +454,8 @@ app.get("/api/preview/posts", (req, res) => {
   res.json({ posts, nextCursor });
 });
 
-app.get("/api/posts/:slug", (req, res) => {
-  const post = db
-    .prepare("SELECT * FROM post WHERE slug = ? AND is_draft = 0")
+app.get("/api/posts/:slug", publicDb, (req, res) => {
+  const post = activeDb().prepare("SELECT * FROM post WHERE slug = ? AND is_draft = 0")
     .get(req.params.slug);
   if (!post) {
     res.status(404).json({ error: "Not found" });
@@ -466,8 +464,8 @@ app.get("/api/posts/:slug", (req, res) => {
   res.json(mapPost(post as Parameters<typeof mapPost>[0]));
 });
 
-app.get("/api/preview/posts/:slug", (req, res) => {
-  const post = db.prepare("SELECT * FROM post WHERE slug = ?").get(req.params.slug);
+app.get("/api/preview/posts/:slug", previewDb, (req, res) => {
+  const post = activeDb().prepare("SELECT * FROM post WHERE slug = ?").get(req.params.slug);
   if (!post) {
     res.status(404).json({ error: "Not found" });
     return;
@@ -488,26 +486,55 @@ app.post("/api/auth/login", loginLimiter, (req, res) => {
     res.status(401).json({ error: "Invalid secret" });
     return;
   }
-  const token = createSession(db);
+  const token = createSession(sessionDb);
   setSessionCookie(res, token);
   res.json({ ok: true });
 });
 
 app.post("/api/auth/logout", (req, res) => {
   const token = req.cookies[SESSION_COOKIE] as string | undefined;
-  if (token) destroySession(db, token);
+  if (token) destroySession(sessionDb, token);
   clearSessionCookie(res);
   res.json({ ok: true });
 });
 
 app.get("/api/auth/me", (req, res) => {
-  res.json({ authenticated: sessionValid(db, req) });
+  res.json({ authenticated: sessionValid(sessionDb, req) });
 });
 
-const admin = requireAdmin(db);
+const adminConfig = [requireAdmin(sessionDb)];
 
-app.get("/api/admin/posts/:slug", admin, (req, res) => {
-  const post = db.prepare("SELECT * FROM post WHERE slug = ?").get(req.params.slug);
+app.get("/api/admin/data-environment", ...adminConfig, (_req, res) => {
+  res.json(getAppConfig());
+});
+
+app.post("/api/admin/data-environment", ...adminConfig, (req, res) => {
+  const body = req.body as { adminScope?: string; publicScope?: string; scope?: string };
+  const patch: { adminScope?: "test" | "production"; publicScope?: "test" | "production" } = {};
+  const legacyScope = body.scope;
+  if (body.adminScope === "test" || body.adminScope === "production") patch.adminScope = body.adminScope;
+  else if (legacyScope === "test" || legacyScope === "production") patch.adminScope = legacyScope;
+  if (body.publicScope === "test" || body.publicScope === "production") patch.publicScope = body.publicScope;
+  if (!patch.adminScope && !patch.publicScope) {
+    res.status(400).json({ error: "adminScope and/or publicScope required" });
+    return;
+  }
+  res.json(updateAppConfig(sessionDb, patch));
+});
+
+app.post("/api/admin/data-environment/sync-profile", ...adminConfig, (_req, res) => {
+  try {
+    copyProfileToProduction();
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(500).json({
+      error: error instanceof Error ? error.message : "Could not sync profile",
+    });
+  }
+});
+
+app.get("/api/admin/posts/:slug", ...admin, (req, res) => {
+  const post = activeDb().prepare("SELECT * FROM post WHERE slug = ?").get(req.params.slug);
   if (!post) {
     res.status(404).json({ error: "Not found" });
     return;
@@ -515,16 +542,14 @@ app.get("/api/admin/posts/:slug", admin, (req, res) => {
   res.json(mapPost(post as Parameters<typeof mapPost>[0]));
 });
 
-app.get("/api/admin/trips", admin, (_req, res) => {
-  const trips = db
-    .prepare(
+app.get("/api/admin/trips", ...admin, (_req, res) => {
+  const trips = activeDb().prepare(
       `SELECT id, slug, title, sort_order, from_place_name, from_lat, from_lng,
               arrived_place_name, arrived_lat, arrived_lng
        FROM trip ORDER BY sort_order, title COLLATE NOCASE`,
     )
     .all() as Array<{ id: string; slug: string; title: string; sort_order: number } & TripCrossingRow>;
-  const chapters = db
-    .prepare(
+  const chapters = activeDb().prepare(
       `SELECT id, trip_id, slug, title, sort_order FROM chapter ORDER BY sort_order, title COLLATE NOCASE`,
     )
     .all() as Array<{ id: string; trip_id: string; slug: string; title: string; sort_order: number }>;
@@ -547,7 +572,7 @@ app.get("/api/admin/trips", admin, (_req, res) => {
   });
 });
 
-app.post("/api/admin/trips", admin, (req, res) => {
+app.post("/api/admin/trips", ...admin, (req, res) => {
   const title = String(req.body.title ?? "").trim();
   if (!title) {
     res.status(400).json({ error: "Trip title required" });
@@ -556,23 +581,22 @@ app.post("/api/admin/trips", admin, (req, res) => {
   const albumRaw = req.body.albumId;
   const albumId =
     albumRaw === undefined || albumRaw === null || albumRaw === "" ? null : String(albumRaw).trim();
-  if (albumId && !db.prepare("SELECT id FROM album WHERE id = ?").get(albumId)) {
+  if (albumId && !activeDb().prepare("SELECT id FROM album WHERE id = ?").get(albumId)) {
     res.status(400).json({ error: "Collection not found" });
     return;
   }
   const id = uuid();
-  const slug = uniqueTripSlug(db, title);
-  db.prepare(
+  const slug = uniqueTripSlug(activeDb(), title);
+  activeDb().prepare(
     `INSERT INTO trip (id, slug, title, sort_order) VALUES (?, ?, ?, COALESCE((SELECT MAX(sort_order) + 1 FROM trip), 0))`,
   ).run(id, slug, title);
   if (albumId) setTripAlbum(id, albumId);
   res.status(201).json({ id, slug, title, albumId: albumId ?? undefined, chapters: [] });
 });
 
-app.patch("/api/admin/trips/:tripId", admin, (req, res) => {
+app.patch("/api/admin/trips/:tripId", ...admin, (req, res) => {
   const tripId = String(req.params.tripId ?? "");
-  const trip = db
-    .prepare(
+  const trip = activeDb().prepare(
       `SELECT id, slug, title, from_place_name, from_lat, from_lng,
               arrived_place_name, arrived_lat, arrived_lng
        FROM trip WHERE id = ?`,
@@ -603,7 +627,7 @@ app.patch("/api/admin/trips/:tripId", admin, (req, res) => {
   if (req.body.albumId !== undefined) {
     const albumRaw = req.body.albumId;
     albumId = albumRaw === null || albumRaw === "" ? null : String(albumRaw).trim();
-    if (albumId && !db.prepare("SELECT id FROM album WHERE id = ?").get(albumId)) {
+    if (albumId && !activeDb().prepare("SELECT id FROM album WHERE id = ?").get(albumId)) {
       res.status(400).json({ error: "Collection not found" });
       return;
     }
@@ -648,7 +672,7 @@ app.patch("/api/admin/trips/:tripId", admin, (req, res) => {
       res.status(400).json({ error: "Crossing coordinates are outside the valid range" });
       return;
     }
-    db.prepare(
+    activeDb().prepare(
       `UPDATE trip
        SET from_place_name = ?, from_lat = ?, from_lng = ?,
            arrived_place_name = ?, arrived_lat = ?, arrived_lng = ?,
@@ -683,13 +707,12 @@ app.patch("/api/admin/trips/:tripId", admin, (req, res) => {
   });
 });
 
-app.get("/api/admin/albums", admin, (_req, res) => {
-  const albums = db
-    .prepare(
+app.get("/api/admin/albums", ...admin, (_req, res) => {
+  const albums = activeDb().prepare(
       `SELECT id, slug, title, sort_order, is_featured FROM album ORDER BY sort_order, title COLLATE NOCASE`,
     )
     .all() as Array<{ id: string; slug: string; title: string; sort_order: number; is_featured: number }>;
-  const tripCounts = db.prepare(
+  const tripCounts = activeDb().prepare(
     `SELECT album_id, COUNT(*) AS count FROM album_trip GROUP BY album_id`,
   ).all() as Array<{ album_id: string; count: number }>;
   const countByAlbum = new Map(tripCounts.map((row) => [row.album_id, row.count]));
@@ -704,23 +727,23 @@ app.get("/api/admin/albums", admin, (_req, res) => {
   });
 });
 
-app.post("/api/admin/albums", admin, (req, res) => {
+app.post("/api/admin/albums", ...admin, (req, res) => {
   const title = String(req.body.title ?? "").trim();
   if (!title) {
     res.status(400).json({ error: "Collection title required" });
     return;
   }
   const id = uuid();
-  const slug = uniqueAlbumSlug(db, title);
-  db.prepare(
+  const slug = uniqueAlbumSlug(activeDb(), title);
+  activeDb().prepare(
     `INSERT INTO album (id, slug, title, sort_order) VALUES (?, ?, ?, COALESCE((SELECT MAX(sort_order) + 1 FROM album), 0))`,
   ).run(id, slug, title);
   res.status(201).json({ id, slug, title, tripCount: 0, featured: false });
 });
 
-app.patch("/api/admin/albums/:albumId", admin, (req, res) => {
+app.patch("/api/admin/albums/:albumId", ...admin, (req, res) => {
   const albumId = String(req.params.albumId ?? "");
-  const album = db.prepare("SELECT id, slug, title FROM album WHERE id = ?").get(albumId) as
+  const album = activeDb().prepare("SELECT id, slug, title FROM album WHERE id = ?").get(albumId) as
     | { id: string; slug: string; title: string }
     | undefined;
   if (!album) {
@@ -733,13 +756,12 @@ app.patch("/api/admin/albums/:albumId", admin, (req, res) => {
   }
   const featured = Boolean(req.body.featured);
   if (featured) {
-    db.prepare(`UPDATE album SET is_featured = 0`).run();
-    db.prepare(`UPDATE album SET is_featured = 1, updated_at = datetime('now') WHERE id = ?`).run(albumId);
+    activeDb().prepare(`UPDATE album SET is_featured = 0`).run();
+    activeDb().prepare(`UPDATE album SET is_featured = 1, updated_at = datetime('now') WHERE id = ?`).run(albumId);
   } else {
-    db.prepare(`UPDATE album SET is_featured = 0, updated_at = datetime('now') WHERE id = ?`).run(albumId);
+    activeDb().prepare(`UPDATE album SET is_featured = 0, updated_at = datetime('now') WHERE id = ?`).run(albumId);
   }
-  const tripCountRow = db
-    .prepare(`SELECT COUNT(*) AS count FROM album_trip WHERE album_id = ?`)
+  const tripCountRow = activeDb().prepare(`SELECT COUNT(*) AS count FROM album_trip WHERE album_id = ?`)
     .get(albumId) as { count: number };
   res.json({
     id: album.id,
@@ -750,7 +772,7 @@ app.patch("/api/admin/albums/:albumId", admin, (req, res) => {
   });
 });
 
-app.post("/api/admin/chapters", admin, (req, res) => {
+app.post("/api/admin/chapters", ...admin, (req, res) => {
   const tripId = String(req.body.tripId ?? "");
   const title = String(req.body.title ?? "").trim();
   if (!tripId) {
@@ -761,23 +783,22 @@ app.post("/api/admin/chapters", admin, (req, res) => {
     res.status(400).json({ error: "Journey title required" });
     return;
   }
-  const trip = db.prepare("SELECT id FROM trip WHERE id = ?").get(tripId);
+  const trip = activeDb().prepare("SELECT id FROM trip WHERE id = ?").get(tripId);
   if (!trip) {
     res.status(400).json({ error: "Trip not found" });
     return;
   }
   const id = uuid();
-  const slug = uniqueChapterSlug(db, tripId, title);
-  db.prepare(
+  const slug = uniqueChapterSlug(activeDb(), tripId, title);
+  activeDb().prepare(
     `INSERT INTO chapter (id, trip_id, slug, title, sort_order)
      VALUES (?, ?, ?, ?, COALESCE((SELECT MAX(sort_order) + 1 FROM chapter WHERE trip_id = ?), 0))`,
   ).run(id, tripId, slug, title, tripId);
   res.status(201).json({ id, slug, title, tripId });
 });
 
-app.get("/api/admin/posts", admin, (_req, res) => {
-  const rows = db
-    .prepare(
+app.get("/api/admin/posts", ...admin, (_req, res) => {
+  const rows = activeDb().prepare(
       `SELECT p.id, p.slug, p.caption, p.taken_at, p.published_at, p.place_name, p.is_draft,
               c.title AS chapter_title, t.title AS trip_title
        FROM post p
@@ -799,8 +820,7 @@ app.get("/api/admin/posts", admin, (_req, res) => {
       trip_title: string | null;
     }[]
   ).map((r) => {
-    const thumb = db
-      .prepare(`SELECT public_url FROM post_image WHERE post_id = ? ORDER BY sort_order LIMIT 1`)
+    const thumb = activeDb().prepare(`SELECT public_url FROM post_image WHERE post_id = ? ORDER BY sort_order LIMIT 1`)
       .get(r.id) as { public_url: string } | undefined;
     return {
       id: r.id,
@@ -818,7 +838,7 @@ app.get("/api/admin/posts", admin, (_req, res) => {
   res.json({ posts });
 });
 
-app.post("/api/posts", admin, upload.array("images", 10), async (req, res) => {
+app.post("/api/posts", ...admin, upload.array("images", 10), async (req, res) => {
   try {
     const files = req.files as Express.Multer.File[];
     if (!files?.length) {
@@ -840,7 +860,7 @@ app.post("/api/posts", admin, upload.array("images", 10), async (req, res) => {
     const takenAt = requestedTakenAt ?? new Date().toISOString();
     const publishedAt = requestedPublishedAt ?? new Date().toISOString();
     const slugBase = req.body.slug ? String(req.body.slug) : placeName ?? takenAt;
-    const slug = uniqueSlug(db, slugBase);
+    const slug = uniqueSlug(activeDb(), slugBase);
     const postId = uuid();
     const organization = resolvePostOrganization(
       formField(req.body, "tripId"),
@@ -863,7 +883,7 @@ app.post("/api/posts", admin, upload.array("images", 10), async (req, res) => {
       saved.push(s);
     }
 
-    db.prepare(
+    activeDb().prepare(
       `INSERT INTO post (id, slug, caption, content_html, taken_at, place_name, lat, lng, trip_id, chapter_id, is_draft, published_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
     ).run(
@@ -880,7 +900,7 @@ app.post("/api/posts", admin, upload.array("images", 10), async (req, res) => {
       publishedAt,
     );
 
-    const insertImg = db.prepare(
+    const insertImg = activeDb().prepare(
       `INSERT INTO post_image (id, post_id, sort_order, storage_key, public_url, width, height, has_location_metadata, has_date_metadata)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
@@ -905,14 +925,14 @@ app.post("/api/posts", admin, upload.array("images", 10), async (req, res) => {
       try {
         const resolved = await reverseGeocodeLabel(metaLat, metaLng);
         if (resolved) {
-          db.prepare(`UPDATE post SET place_name = ? WHERE id = ?`).run(resolved, postId);
+          activeDb().prepare(`UPDATE post SET place_name = ? WHERE id = ?`).run(resolved, postId);
         }
       } catch (e) {
         console.error("reverse-geocode on publish", e);
       }
     }
 
-    const post = db.prepare("SELECT * FROM post WHERE id = ?").get(postId);
+    const post = activeDb().prepare("SELECT * FROM post WHERE id = ?").get(postId);
     res.status(201).json(mapPost(post as Parameters<typeof mapPost>[0]));
   } catch (e) {
     console.error(e);
@@ -920,8 +940,8 @@ app.post("/api/posts", admin, upload.array("images", 10), async (req, res) => {
   }
 });
 
-app.post("/api/posts/:id/publish", admin, (req, res) => {
-  const existing = db.prepare("SELECT * FROM post WHERE id = ?").get(req.params.id) as
+app.post("/api/posts/:id/publish", ...admin, (req, res) => {
+  const existing = activeDb().prepare("SELECT * FROM post WHERE id = ?").get(req.params.id) as
     | Parameters<typeof mapPost>[0]
     | undefined;
   if (!existing) {
@@ -929,9 +949,9 @@ app.post("/api/posts/:id/publish", admin, (req, res) => {
     return;
   }
   if ((existing as { is_draft?: number }).is_draft) {
-    db.prepare(`UPDATE post SET is_draft = 0, updated_at = datetime('now') WHERE id = ?`).run(req.params.id);
+    activeDb().prepare(`UPDATE post SET is_draft = 0, updated_at = datetime('now') WHERE id = ?`).run(req.params.id);
   }
-  const updated = db.prepare("SELECT * FROM post WHERE id = ?").get(req.params.id);
+  const updated = activeDb().prepare("SELECT * FROM post WHERE id = ?").get(req.params.id);
   res.json(mapPost(updated as Parameters<typeof mapPost>[0]));
 });
 
@@ -940,13 +960,13 @@ function clamp01(value: number) {
   return Math.min(1, Math.max(0, value));
 }
 
-app.patch("/api/post-images/:id/focus", admin, (req, res) => {
-  const row = db.prepare("SELECT id FROM post_image WHERE id = ?").get(req.params.id) as { id: string } | undefined;
+app.patch("/api/post-images/:id/focus", ...admin, (req, res) => {
+  const row = activeDb().prepare("SELECT id FROM post_image WHERE id = ?").get(req.params.id) as { id: string } | undefined;
   if (!row) {
     res.status(404).json({ error: "Image not found" });
     return;
   }
-  const existing = db.prepare("SELECT focus_x, focus_y, fit_mode FROM post_image WHERE id = ?").get(row.id) as {
+  const existing = activeDb().prepare("SELECT focus_x, focus_y, fit_mode FROM post_image WHERE id = ?").get(row.id) as {
     focus_x: number;
     focus_y: number;
     fit_mode: string;
@@ -955,8 +975,8 @@ app.patch("/api/post-images/:id/focus", admin, (req, res) => {
   const focusX = body.focusX === undefined ? existing.focus_x : clamp01(Number(body.focusX));
   const focusY = body.focusY === undefined ? existing.focus_y : clamp01(Number(body.focusY));
   const fit = body.fit === "contain" || body.fit === "cover" ? body.fit : existing.fit_mode === "contain" ? "contain" : "cover";
-  db.prepare(`UPDATE post_image SET focus_x = ?, focus_y = ?, fit_mode = ? WHERE id = ?`).run(focusX, focusY, fit, row.id);
-  db.prepare(`UPDATE post SET updated_at = datetime('now') WHERE id = (SELECT post_id FROM post_image WHERE id = ?)`).run(
+  activeDb().prepare(`UPDATE post_image SET focus_x = ?, focus_y = ?, fit_mode = ? WHERE id = ?`).run(focusX, focusY, fit, row.id);
+  activeDb().prepare(`UPDATE post SET updated_at = datetime('now') WHERE id = (SELECT post_id FROM post_image WHERE id = ?)`).run(
     row.id,
   );
   res.json({ id: row.id, focusX, focusY, fit: fit === "contain" ? "contain" : "cover" });
@@ -964,12 +984,12 @@ app.patch("/api/post-images/:id/focus", admin, (req, res) => {
 
 async function appendPostImages(postId: string, files: Express.Multer.File[]) {
   const existingCount = (
-    db.prepare("SELECT COUNT(*) as count FROM post_image WHERE post_id = ?").get(postId) as { count: number }
+    activeDb().prepare("SELECT COUNT(*) as count FROM post_image WHERE post_id = ?").get(postId) as { count: number }
   ).count;
   if (existingCount + files.length > 10) {
     throw new Error("TOO_MANY_IMAGES");
   }
-  const insertImg = db.prepare(
+  const insertImg = activeDb().prepare(
     `INSERT INTO post_image (id, post_id, sort_order, storage_key, public_url, width, height, has_location_metadata, has_date_metadata)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
@@ -989,12 +1009,12 @@ async function appendPostImages(postId: string, files: Express.Multer.File[]) {
       hasDate ? 1 : 0,
     );
   }
-  db.prepare(`UPDATE post SET updated_at = datetime('now') WHERE id = ?`).run(postId);
+  activeDb().prepare(`UPDATE post SET updated_at = datetime('now') WHERE id = ?`).run(postId);
 }
 
-app.post("/api/posts/:id/images", admin, upload.array("images", 10), async (req, res) => {
+app.post("/api/posts/:id/images", ...admin, upload.array("images", 10), async (req, res) => {
   const postId = String(req.params.id);
-  const existing = db.prepare("SELECT id FROM post WHERE id = ?").get(postId) as { id: string } | undefined;
+  const existing = activeDb().prepare("SELECT id FROM post WHERE id = ?").get(postId) as { id: string } | undefined;
   if (!existing) {
     res.status(404).json({ error: "Post not found" });
     return;
@@ -1006,7 +1026,7 @@ app.post("/api/posts/:id/images", admin, upload.array("images", 10), async (req,
   }
   try {
     await appendPostImages(postId, files);
-    const updated = db.prepare("SELECT * FROM post WHERE id = ?").get(postId);
+    const updated = activeDb().prepare("SELECT * FROM post WHERE id = ?").get(postId);
     res.json(mapPost(updated as Parameters<typeof mapPost>[0]));
   } catch (e) {
     if (e instanceof Error && e.message === "TOO_MANY_IMAGES") {
@@ -1018,8 +1038,8 @@ app.post("/api/posts/:id/images", admin, upload.array("images", 10), async (req,
   }
 });
 
-app.delete("/api/post-images/:id", admin, (req, res) => {
-  const row = db.prepare("SELECT id, post_id, public_url FROM post_image WHERE id = ?").get(req.params.id) as
+app.delete("/api/post-images/:id", ...admin, (req, res) => {
+  const row = activeDb().prepare("SELECT id, post_id, public_url FROM post_image WHERE id = ?").get(req.params.id) as
     | { id: string; post_id: string; public_url: string }
     | undefined;
   if (!row) {
@@ -1027,26 +1047,25 @@ app.delete("/api/post-images/:id", admin, (req, res) => {
     return;
   }
   const count = (
-    db.prepare("SELECT COUNT(*) as count FROM post_image WHERE post_id = ?").get(row.post_id) as { count: number }
+    activeDb().prepare("SELECT COUNT(*) as count FROM post_image WHERE post_id = ?").get(row.post_id) as { count: number }
   ).count;
   if (count <= 1) {
     res.status(400).json({ error: "Keep at least one photo on the journal" });
     return;
   }
   deleteImageByUrl(row.public_url);
-  db.prepare("DELETE FROM post_image WHERE id = ?").run(row.id);
-  const remaining = db
-    .prepare("SELECT id FROM post_image WHERE post_id = ? ORDER BY sort_order, id")
+  activeDb().prepare("DELETE FROM post_image WHERE id = ?").run(row.id);
+  const remaining = activeDb().prepare("SELECT id FROM post_image WHERE post_id = ? ORDER BY sort_order, id")
     .all(row.post_id) as { id: string }[];
-  const setOrder = db.prepare("UPDATE post_image SET sort_order = ? WHERE id = ?");
+  const setOrder = activeDb().prepare("UPDATE post_image SET sort_order = ? WHERE id = ?");
   remaining.forEach((img, index) => setOrder.run(index, img.id));
-  db.prepare(`UPDATE post SET updated_at = datetime('now') WHERE id = ?`).run(row.post_id);
-  const updated = db.prepare("SELECT * FROM post WHERE id = ?").get(row.post_id);
+  activeDb().prepare(`UPDATE post SET updated_at = datetime('now') WHERE id = ?`).run(row.post_id);
+  const updated = activeDb().prepare("SELECT * FROM post WHERE id = ?").get(row.post_id);
   res.json(mapPost(updated as Parameters<typeof mapPost>[0]));
 });
 
-app.patch("/api/posts/:id", admin, (req, res) => {
-  const existing = db.prepare("SELECT * FROM post WHERE id = ?").get(req.params.id) as
+app.patch("/api/posts/:id", ...admin, (req, res) => {
+  const existing = activeDb().prepare("SELECT * FROM post WHERE id = ?").get(req.params.id) as
     | Parameters<typeof mapPost>[0]
     | undefined;
   if (!existing) {
@@ -1105,7 +1124,7 @@ app.patch("/api/posts/:id", admin, (req, res) => {
     return;
   }
 
-  db.prepare(
+  activeDb().prepare(
     `UPDATE post
      SET caption = ?, content_html = ?, place_name = ?, taken_at = ?, published_at = ?, lat = ?, lng = ?, trip_id = ?, chapter_id = ?, updated_at = datetime('now')
      WHERE id = ?`,
@@ -1121,20 +1140,19 @@ app.patch("/api/posts/:id", admin, (req, res) => {
     organization.chapterId,
     req.params.id,
   );
-  const updated = db.prepare("SELECT * FROM post WHERE id = ?").get(req.params.id);
+  const updated = activeDb().prepare("SELECT * FROM post WHERE id = ?").get(req.params.id);
   res.json(mapPost(updated as Parameters<typeof mapPost>[0]));
 });
 
-app.delete("/api/posts/:id", admin, (req, res) => {
-  const images = db
-    .prepare("SELECT public_url FROM post_image WHERE post_id = ?")
+app.delete("/api/posts/:id", ...admin, (req, res) => {
+  const images = activeDb().prepare("SELECT public_url FROM post_image WHERE post_id = ?")
     .all(req.params.id) as { public_url: string }[];
   for (const img of images) deleteImageByUrl(img.public_url);
-  db.prepare("DELETE FROM post WHERE id = ?").run(req.params.id);
+  activeDb().prepare("DELETE FROM post WHERE id = ?").run(req.params.id);
   res.json({ ok: true });
 });
 
-app.get("/api/geocode/reverse", admin, geocodeLimiter, async (req, res) => {
+app.get("/api/geocode/reverse", ...admin, geocodeLimiter, async (req, res) => {
   const lat = Number(req.query.lat);
   const lng = Number(req.query.lng);
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
@@ -1150,7 +1168,7 @@ app.get("/api/geocode/reverse", admin, geocodeLimiter, async (req, res) => {
   }
 });
 
-app.get("/api/geocode/search", admin, geocodeLimiter, async (req, res) => {
+app.get("/api/geocode/search", ...admin, geocodeLimiter, async (req, res) => {
   const q = String(req.query.q ?? "").trim();
   if (q.length < 2 || q.length > 100) {
     res.status(400).json({ error: "q must be 2–100 characters" });
@@ -1165,7 +1183,7 @@ app.get("/api/geocode/search", admin, geocodeLimiter, async (req, res) => {
   }
 });
 
-app.patch("/api/profile", admin, upload.single("avatar"), async (req, res) => {
+app.patch("/api/profile", ...admin, upload.single("avatar"), async (req, res) => {
   const displayName = req.body.displayName ? String(req.body.displayName) : undefined;
   const username = req.body.username ? String(req.body.username) : undefined;
   const tagline = req.body.tagline != null ? String(req.body.tagline) : undefined;
@@ -1175,7 +1193,7 @@ app.patch("/api/profile", admin, upload.single("avatar"), async (req, res) => {
     const saved = await saveImage(req.file);
     avatarUrl = saved.publicUrl;
   }
-  const cur = db.prepare("SELECT * FROM profile WHERE id = 1").get() as ProfileRow;
+  const cur = activeDb().prepare("SELECT * FROM profile WHERE id = 1").get() as ProfileRow;
   const coord = (value: unknown) => {
     if (value === undefined) return undefined;
     if (value === "" || value == null) return null;
@@ -1197,7 +1215,7 @@ app.patch("/api/profile", admin, upload.single("avatar"), async (req, res) => {
   };
   const avatarFocusX = focus(req.body.avatarFocusX, cur.avatar_focus_x);
   const avatarFocusY = focus(req.body.avatarFocusY, cur.avatar_focus_y);
-  db.prepare(
+  activeDb().prepare(
   `UPDATE profile SET display_name = ?, username = ?, tagline = ?, bio = ?, avatar_url = COALESCE(?, avatar_url),
      avatar_focus_x = ?, avatar_focus_y = ?, current_place_name = ?, current_lat = ?, current_lng = ?,
      updated_at = datetime('now') WHERE id = 1`,
@@ -1213,9 +1231,8 @@ app.patch("/api/profile", admin, upload.single("avatar"), async (req, res) => {
     currentLat,
     currentLng,
   );
-  const updated = db.prepare("SELECT * FROM profile WHERE id = 1").get() as ProfileRow;
-  const links = db
-    .prepare("SELECT label, href FROM profile_link WHERE profile_id = 1 ORDER BY sort_order")
+  const updated = activeDb().prepare("SELECT * FROM profile WHERE id = 1").get() as ProfileRow;
+  const links = activeDb().prepare("SELECT label, href FROM profile_link WHERE profile_id = 1 ORDER BY sort_order")
     .all() as { label: string; href: string }[];
   res.json({
     displayName: updated.display_name,

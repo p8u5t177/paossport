@@ -44,9 +44,22 @@ ADMIN_SECRET="a-long-random-secret" npm start
 The Node server serves the built React app, REST API, and uploaded media from port `3847` by default. Use a host with persistent disk (Fly.io, Railway, or a VPS) and persist:
 
 - `data/app.db`
+- `data/production.db` (when using dual databases)
 - `server/media/`
 
 Back up both together. Uploaded images are converted to WebP, auto-rotated, and constrained to 2000×2000 pixels.
+
+### Test + production SQLite
+
+Two databases share the same data volume: `app.db` (test) and `production.db` (live). No extra Coolify env vars are required beyond persistent disk.
+
+Copy the profile into production once via **Admin → Settings** or:
+
+```bash
+npm run init-production-db
+```
+
+In **Admin → Settings**, choose which database you edit and which one the public site reads. Those settings persist in `app.db`.
 
 ## Admin workflow
 

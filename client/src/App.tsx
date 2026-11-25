@@ -2415,6 +2415,34 @@ function normalizeDataEnvironment(
   };
 }
 
+async function saveDataEnvironment(patch: Partial<AdminDataEnvironment>): Promise<AdminDataEnvironment> {
+  const attempts: Array<{ url: string; method: string }> = [
+    { url: "/api/admin/data-environment", method: "PATCH" },
+    { url: "/api/admin/data-environment", method: "POST" },
+    { url: "/api/admin/settings/database", method: "PATCH" },
+  ];
+  let lastError: Error | undefined;
+  for (const { url, method } of attempts) {
+    const response = await fetch(url, {
+      method,
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    if (response.status === 404) {
+      lastError = new Error(`Request failed (404)`);
+      continue;
+    }
+    if (!response.ok) {
+      const payload = (await response.json().catch(() => ({}))) as { error?: string };
+      throw new Error(payload.error ?? `Request failed (${response.status})`);
+    }
+    const data = (await response.json()) as Partial<AdminDataEnvironment> & { scope?: "test" | "production" };
+    return normalizeDataEnvironment(data);
+  }
+  throw lastError ?? new Error("Request failed");
+}
+
 async function fetchDataEnvironment(): Promise<{
   env: AdminDataEnvironment;
   needsDeploy: boolean;
@@ -2521,18 +2549,7 @@ function AdminSettings() {
     setError("");
     setMessage("");
     try {
-      const data = ctx
-        ? await ctx.updateConfig(patch)
-        : normalizeDataEnvironment(
-            await api<Partial<AdminDataEnvironment> & { scope?: "test" | "production" }>(
-              "/api/admin/data-environment",
-              {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(patch),
-              },
-            ),
-          );
+      const data = ctx ? await ctx.updateConfig(patch) : await saveDataEnvironment(patch);
       setEnv(data);
       setMessage("Settings saved.");
     } catch (err) {
@@ -2648,24 +2665,12 @@ function AdminDataEnvironmentProvider({ children }: { children: React.ReactNode 
     void refresh().catch(() => setEnv(null));
   }, [refresh]);
 
-  const updateConfig = useCallback(
-    async (patch: Partial<AdminDataEnvironment>) => {
-      const data = normalizeDataEnvironment(
-        await api<Partial<AdminDataEnvironment> & { scope?: "test" | "production" }>(
-          "/api/admin/data-environment",
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(patch),
-          },
-        ),
-      );
-      setEnv(data);
-      setReloadKey(data.adminScope);
-      return data;
-    },
-    [],
-  );
+  const updateConfig = useCallback(async (patch: Partial<AdminDataEnvironment>) => {
+    const data = await saveDataEnvironment(patch);
+    setEnv(data);
+    setReloadKey(data.adminScope);
+    return data;
+  }, []);
 
   const contextValue = useMemo(
     () => ({ env, refresh, updateConfig, reloadKey }),
@@ -2706,7 +2711,9 @@ function AdminNavLinks({ onNavigate }: { onNavigate?: () => void }) {
 
 function AdminLayoutOutlet() {
   const ctx = useAdminDataEnvironment();
-  return <Outlet key={ctx?.reloadKey ?? "default"} />;
+  const location = useLocation();
+  const outletKey = location.pathname === "/admin/settings" ? "settings" : (ctx?.reloadKey ?? "default");
+  return <Outlet key={outletKey} />;
 }
 
 function AdminLayoutShell() {

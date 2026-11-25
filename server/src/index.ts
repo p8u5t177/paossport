@@ -504,11 +504,7 @@ app.get("/api/auth/me", (req, res) => {
 
 const adminConfig = [requireAdmin(sessionDb)];
 
-app.get("/api/admin/data-environment", ...adminConfig, (_req, res) => {
-  res.json(getAppConfig());
-});
-
-app.post("/api/admin/data-environment", ...adminConfig, (req, res) => {
+function updateDataEnvironmentHandler(req: express.Request, res: express.Response) {
   const body = req.body as { adminScope?: string; publicScope?: string; scope?: string };
   const patch: { adminScope?: "test" | "production"; publicScope?: "test" | "production" } = {};
   const legacyScope = body.scope;
@@ -520,7 +516,7 @@ app.post("/api/admin/data-environment", ...adminConfig, (req, res) => {
     return;
   }
   res.json(updateAppConfig(sessionDb, patch));
-});
+}
 
 app.post("/api/admin/data-environment/sync-profile", ...adminConfig, (_req, res) => {
   try {
@@ -532,6 +528,14 @@ app.post("/api/admin/data-environment/sync-profile", ...adminConfig, (_req, res)
     });
   }
 });
+
+app.get("/api/admin/data-environment", ...adminConfig, (_req, res) => {
+  res.json(getAppConfig());
+});
+
+app.patch("/api/admin/data-environment", ...adminConfig, updateDataEnvironmentHandler);
+app.post("/api/admin/data-environment", ...adminConfig, updateDataEnvironmentHandler);
+app.patch("/api/admin/settings/database", ...adminConfig, updateDataEnvironmentHandler);
 
 app.get("/api/admin/posts/:slug", ...admin, (req, res) => {
   const post = activeDb().prepare("SELECT * FROM post WHERE slug = ?").get(req.params.slug);

@@ -4,6 +4,8 @@ export type ProfileRow = {
   tagline: string;
   bio: string;
   avatar_url: string | null;
+  avatar_focus_x: number;
+  avatar_focus_y: number;
   current_place_name: string | null;
   current_lat: number | null;
   current_lng: number | null;

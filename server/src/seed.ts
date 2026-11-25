@@ -4,6 +4,7 @@ import fs from "node:fs";
 import sharp from "sharp";
 import { v4 as uuid } from "uuid";
 import { MEDIA_ROOT, ensureMediaDirs } from "./media.js";
+import { plainTextToHtml } from "./rich-text.js";
 
 async function makePlaceholder(
   destDir: string,
@@ -103,8 +104,8 @@ async function main() {
     const postId = existing?.id ?? uuid();
     if (!existing) {
       db.prepare(
-        `INSERT INTO post (id, slug, caption, taken_at, place_name, lat, lng) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      ).run(postId, p.slug, p.caption, p.taken, p.place, p.lat, p.lng);
+        `INSERT INTO post (id, slug, caption, content_html, taken_at, place_name, lat, lng) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(postId, p.slug, p.caption, plainTextToHtml(p.caption), p.taken, p.place, p.lat, p.lng);
     }
 
     const currentCount = (

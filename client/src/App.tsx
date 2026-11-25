@@ -11,6 +11,9 @@ import {
   useNavigate,
   useParams,
 } from "react-router-dom";
+import { PlaceInput } from "./PlaceInput";
+import { RichTextEditor } from "./RichTextEditor";
+import { resolveStoryHtml, storyHtmlToPlainText, storyToEditorHtml } from "./rich-text";
 
 type Image = {
   id: string;
@@ -123,11 +126,14 @@ type PostChapter = {
 };
 
 type PostTrip = { id: string; slug: string; title: string };
+type TravelPlace = { name?: string; lat: number; lng: number };
+type TripCrossing = { from: TravelPlace; arrived: TravelPlace };
 
 type Post = {
   id: string;
   slug: string;
   caption: string;
+  contentHtml?: string;
   takenAt: string;
   publishedAt: string;
   isDraft?: boolean;
@@ -137,11 +143,31 @@ type Post = {
   images: Image[];
 };
 
+function StoryHtml({ html, className }: { html: string; className?: string }) {
+  const trimmed = html.trim();
+  if (!trimmed) return null;
+  return <div className={className} dangerouslySetInnerHTML={{ __html: trimmed }} />;
+}
+
+function PostStory({ post, className }: { post: Post; className?: string }) {
+  const html = resolveStoryHtml(post);
+  if (html) return <StoryHtml html={html} className={className} />;
+  if (!post.caption.trim()) return null;
+  return <p className={className}>{post.caption}</p>;
+}
+
 type AdminChapter = { id: string; slug: string; title: string; tripId: string };
-type AdminTrip = { id: string; slug: string; title: string; albumId?: string | null; chapters: AdminChapter[] };
+type AdminTrip = {
+  id: string;
+  slug: string;
+  title: string;
+  albumId?: string | null;
+  crossing?: TripCrossing;
+  chapters: AdminChapter[];
+};
 type AdminAlbum = { id: string; slug: string; title: string; tripCount: number; featured?: boolean };
 type FeedChapter = { id: string; slug: string; title: string };
-type FeedTrip = { id: string; slug: string; title: string; chapters: FeedChapter[] };
+type FeedTrip = { id: string; slug: string; title: string; crossing?: TripCrossing; chapters: FeedChapter[] };
 type FeedAlbum = { id: string; slug: string; title: string; featured?: boolean; trips: FeedTrip[] };
 type FeedCatalog = { albums: FeedAlbum[]; trips: FeedTrip[] };
 
@@ -175,6 +201,8 @@ type Profile = {
   tagline: string;
   bio: string;
   avatarUrl?: string;
+  avatarFocusX?: number;
+  avatarFocusY?: number;
   currentLocation?: { name?: string; lat?: number; lng?: number };
   links: { label: string; href: string }[];
 };
@@ -200,7 +228,8 @@ function storyShortTitle(post: Post) {
     const primary = post.location.name.split(",")[0]?.trim();
     if (primary) return primary;
   }
-  const words = post.caption.trim().split(/\s+/).filter(Boolean).slice(0, 5).join(" ");
+  const plain = storyHtmlToPlainText(post.contentHtml || post.caption);
+  const words = plain.split(/\s+/).filter(Boolean).slice(0, 5).join(" ");
   if (words) return words;
   return new Intl.DateTimeFormat("en", { month: "short", year: "numeric" }).format(new Date(post.takenAt));
 }
@@ -368,7 +397,7 @@ function StoryCatalogSelector({
   catalog: FeedCatalog;
   posts: Post[];
   openAlbumId: string | null;
-  selectedTripId: string;
+  selectedTripId: string | null;
   onOpenAlbum: (albumId: string) => void;
   onCloseAlbum: () => void;
   onSelectTrip: (tripId: string) => void;
@@ -389,15 +418,19 @@ function StoryCatalogSelector({
         aria-orientation="horizontal"
       >
         {openAlbum
-          ? openAlbum.trips.map((trip) => (
-              <TripStoryChip
-                key={trip.id}
-                trip={trip}
-                posts={posts}
-                selected={trip.id === selectedTripId}
-                onSelect={() => onSelectTrip(trip.id)}
-              />
-            ))
+          ? (
+            <>
+              {openAlbum.trips.map((trip) => (
+                <TripStoryChip
+                  key={trip.id}
+                  trip={trip}
+                  posts={posts}
+                  selected={trip.id === selectedTripId}
+                  onSelect={() => onSelectTrip(trip.id)}
+                />
+              ))}
+            </>
+          )
           : (
             <>
               {catalog.albums.map((album) => (
@@ -433,12 +466,14 @@ function FeedViewRuleMenu({
   onOpenChange,
   view,
   detailLabel,
+  scope,
   onViewChange,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   view: FeedViewMode;
   detailLabel: string;
+  scope: "collection" | "trip";
   onViewChange: (view: FeedViewMode) => void;
 }) {
   const anchorRef = useRef<HTMLDivElement>(null);
@@ -494,7 +529,11 @@ function FeedViewRuleMenu({
         </svg>
       </button>
       {open ? (
-        <div className="feed-view-popover" role="dialog" aria-label="View for this trip">
+        <div
+          className="feed-view-popover"
+          role="dialog"
+          aria-label={scope === "collection" ? "View for this collection" : "View for this trip"}
+        >
           <p className="feed-view-label">View</p>
           <button
             type="button"
@@ -502,7 +541,7 @@ function FeedViewRuleMenu({
             onClick={() => pickView("timeline")}
           >
             <span className="feed-view-option-title">Timeline</span>
-            <span className="feed-view-option-hint">Newest first</span>
+            <span className="feed-view-option-hint">All entries, newest first</span>
             {view === "timeline" ? <span className="feed-view-option-check" aria-hidden>✓</span> : null}
           </button>
           <button
@@ -510,8 +549,10 @@ function FeedViewRuleMenu({
             className={`feed-view-option${view === "grouped" ? " feed-view-option-selected" : ""}`}
             onClick={() => pickView("grouped")}
           >
-            <span className="feed-view-option-title">Grouped by journey</span>
-            <span className="feed-view-option-hint">Story arcs inside this trip</span>
+            <span className="feed-view-option-title">{scope === "collection" ? "By trip" : "By chapter"}</span>
+            <span className="feed-view-option-hint">
+              {scope === "collection" ? "Browse one trip at a time" : "Browse sections inside this trip"}
+            </span>
             {view === "grouped" ? <span className="feed-view-option-check" aria-hidden>✓</span> : null}
           </button>
         </div>
@@ -532,16 +573,16 @@ function FeedChapterBar({
   return (
     <div className="feed-chapter-bar">
       <label className="feed-view-label" htmlFor="feed-chapter-select">
-        Journey
+        Chapter
       </label>
       <select
         id="feed-chapter-select"
         className="feed-view-chapter-select"
-        aria-label="Journey"
+        aria-label="Chapter"
         value={chapterId}
         onChange={(e) => onChapterChange(e.target.value)}
       >
-        <option value={ALL_CHAPTERS}>All journeys</option>
+        <option value={ALL_CHAPTERS}>All entries</option>
         {chapters.map((chapter) => (
           <option key={chapter.id} value={chapter.id}>
             {chapter.title}
@@ -773,7 +814,11 @@ function Avatar({ profile, large = false }: { profile: Profile; large?: boolean 
   return (
     <div className={`avatar ${large ? "avatar-large" : ""}`}>
       {profile.avatarUrl ? (
-        <img src={profile.avatarUrl} alt={`${profile.displayName}'s portrait`} />
+        <img
+          src={profile.avatarUrl}
+          alt={`${profile.displayName}'s portrait`}
+          style={{ objectPosition: `${(profile.avatarFocusX ?? 0.5) * 100}% ${(profile.avatarFocusY ?? 0.5) * 100}%` }}
+        />
       ) : (
         <span>{avatarInitial(profile.displayName)}</span>
       )}
@@ -1222,11 +1267,180 @@ function PostCard({
       <div className="post-copy">
         <div className="post-copy-text">
           <strong>{profile.username}</strong>
-          {post.caption.trim() && <p>{post.caption}</p>}
+          <PostStory post={post} className="post-story rich-story" />
         </div>
         <Link className="quiet-link" to={`${site.postBase}/${post.slug}`}>View journal</Link>
       </div>
     </article>
+  );
+}
+
+const CROSSING_MAP_WIDTH = 640;
+const CROSSING_MAP_HEIGHT = 280;
+
+function mercatorPoint(place: TravelPlace) {
+  const latitude = Math.max(-85.0511, Math.min(85.0511, place.lat));
+  const radians = (latitude * Math.PI) / 180;
+  return {
+    x: (place.lng + 180) / 360,
+    y: (1 - Math.log(Math.tan(radians) + 1 / Math.cos(radians)) / Math.PI) / 2,
+  };
+}
+
+function wrappedWorldDelta(value: number) {
+  return ((value + 0.5) % 1 + 1) % 1 - 0.5;
+}
+
+function crossingMapLayout(crossing: TripCrossing) {
+  const from = mercatorPoint(crossing.from);
+  const arrived = mercatorPoint(crossing.arrived);
+  const dx = wrappedWorldDelta(arrived.x - from.x);
+  const dy = arrived.y - from.y;
+  const centerX = from.x + dx / 2;
+  const centerY = from.y + dy / 2;
+  const horizontalZoom = Math.log2((CROSSING_MAP_WIDTH * 0.7) / Math.max(Math.abs(dx) * 256, 1));
+  const verticalZoom = Math.log2((CROSSING_MAP_HEIGHT * 0.5) / Math.max(Math.abs(dy) * 256, 1));
+  const zoom = Math.max(1, Math.min(5, Math.floor(Math.min(horizontalZoom, verticalZoom))));
+  const worldSize = 256 * 2 ** zoom;
+  const point = (projected: { x: number; y: number }) => ({
+    x: CROSSING_MAP_WIDTH / 2 + wrappedWorldDelta(projected.x - centerX) * worldSize,
+    y: CROSSING_MAP_HEIGHT / 2 + (projected.y - centerY) * worldSize,
+  });
+  const fromPoint = point(from);
+  const arrivedPoint = point(arrived);
+  const span = Math.hypot(arrivedPoint.x - fromPoint.x, arrivedPoint.y - fromPoint.y);
+  const direction = {
+    x: (arrivedPoint.x - fromPoint.x) / Math.max(span, 1),
+    y: (arrivedPoint.y - fromPoint.y) / Math.max(span, 1),
+  };
+  const bend = Math.min(62, Math.max(24, span * 0.16));
+  const control = {
+    x: (fromPoint.x + arrivedPoint.x) / 2 - direction.y * bend,
+    y: (fromPoint.y + arrivedPoint.y) / 2 + direction.x * bend,
+  };
+  const centerWorld = { x: centerX * worldSize, y: centerY * worldSize };
+  const viewportLeft = centerWorld.x - CROSSING_MAP_WIDTH / 2;
+  const viewportTop = centerWorld.y - CROSSING_MAP_HEIGHT / 2;
+  const tileCount = 2 ** zoom;
+  const tiles = [];
+  for (
+    let tileY = Math.floor(viewportTop / 256);
+    tileY <= Math.floor((viewportTop + CROSSING_MAP_HEIGHT) / 256);
+    tileY += 1
+  ) {
+    if (tileY < 0 || tileY >= tileCount) continue;
+    for (
+      let rawTileX = Math.floor(viewportLeft / 256);
+      rawTileX <= Math.floor((viewportLeft + CROSSING_MAP_WIDTH) / 256);
+      rawTileX += 1
+    ) {
+      const tileX = ((rawTileX % tileCount) + tileCount) % tileCount;
+      tiles.push({
+        key: `${zoom}-${rawTileX}-${tileY}`,
+        url: `https://tile.openstreetmap.org/${zoom}/${tileX}/${tileY}.png`,
+        x: rawTileX * 256 - viewportLeft,
+        y: tileY * 256 - viewportTop,
+      });
+    }
+  }
+  const pointsAreClose = Math.abs(fromPoint.x - arrivedPoint.x) < 160;
+  const fromLabelSide = pointsAreClose
+    ? (fromPoint.x > 120 ? "left" : "right")
+    : (fromPoint.x < CROSSING_MAP_WIDTH / 2 ? "right" : "left");
+  const arrivedLabelSide = pointsAreClose
+    ? (fromLabelSide === "left" ? "right" : "left")
+    : (arrivedPoint.x < CROSSING_MAP_WIDTH / 2 ? "right" : "left");
+  return {
+    from: fromPoint,
+    arrived: arrivedPoint,
+    path: `M ${fromPoint.x} ${fromPoint.y} Q ${control.x} ${control.y} ${arrivedPoint.x} ${arrivedPoint.y}`,
+    arrivalAngle: (Math.atan2(arrivedPoint.y - control.y, arrivedPoint.x - control.x) * 180) / Math.PI,
+    arrivedLabelSide,
+    fromLabelSide,
+    tiles,
+  };
+}
+
+function shortPlaceName(place: TravelPlace) {
+  return place.name?.split(",")[0]?.trim() || "Origin";
+}
+
+function TripCrossingMap({ trip }: { trip: FeedTrip }) {
+  if (!trip.crossing) return null;
+  const layout = crossingMapLayout(trip.crossing);
+  const fromName = shortPlaceName(trip.crossing.from);
+  const arrivedName = shortPlaceName(trip.crossing.arrived);
+
+  return (
+    <section
+      className="trip-crossing-card"
+      aria-label={`${trip.title}: traveled from ${fromName} to ${arrivedName}`}
+    >
+      <div className="trip-crossing-heading">
+        <div>
+          <h2>{fromName} <span aria-hidden>→</span> {arrivedName}</h2>
+        </div>
+        <span className="trip-crossing-trip">{trip.title}</span>
+      </div>
+      <div className="trip-crossing-map">
+        <svg
+          viewBox={`0 0 ${CROSSING_MAP_WIDTH} ${CROSSING_MAP_HEIGHT}`}
+          role="img"
+          aria-label={`Map route from ${fromName} to ${arrivedName}`}
+        >
+          <rect className="trip-crossing-map-fallback" width="100%" height="100%" />
+          <g className="trip-crossing-tiles" aria-hidden>
+            {layout.tiles.map((tile) => (
+              <image
+                key={tile.key}
+                href={tile.url}
+                x={tile.x}
+                y={tile.y}
+                width="256"
+                height="256"
+              />
+            ))}
+          </g>
+          <path className="trip-crossing-route-shadow" d={layout.path} />
+          <path className="trip-crossing-route" d={layout.path} pathLength="1" />
+          <g className="trip-crossing-origin" transform={`translate(${layout.from.x} ${layout.from.y})`}>
+            <circle className="trip-crossing-point-halo" r="8" />
+            <circle className="trip-crossing-point-dot" r="3.5" />
+          </g>
+          <g className="trip-crossing-destination" transform={`translate(${layout.arrived.x} ${layout.arrived.y})`}>
+            <circle className="trip-crossing-point-halo" r="9" />
+            <circle className="trip-crossing-point-dot" r="4" />
+          </g>
+          <g
+            className="trip-crossing-arrival"
+            transform={`translate(${layout.arrived.x} ${layout.arrived.y}) rotate(${layout.arrivalAngle}) translate(-13 0)`}
+          >
+            <path className="trip-crossing-arrival-shadow" d="M -8 -6 L 0 0 L -8 6" />
+            <path className="trip-crossing-arrival-arrow" d="M -8 -6 L 0 0 L -8 6" />
+          </g>
+        </svg>
+        <span
+          className={`trip-crossing-label trip-crossing-label-${layout.fromLabelSide}`}
+          style={{ left: `${(layout.from.x / CROSSING_MAP_WIDTH) * 100}%`, top: `${(layout.from.y / CROSSING_MAP_HEIGHT) * 100}%` }}
+        >
+          {fromName}
+        </span>
+        <span
+          className={`trip-crossing-label trip-crossing-label-${layout.arrivedLabelSide}`}
+          style={{ left: `${(layout.arrived.x / CROSSING_MAP_WIDTH) * 100}%`, top: `${(layout.arrived.y / CROSSING_MAP_HEIGHT) * 100}%` }}
+        >
+          {arrivedName}
+        </span>
+        <a
+          className="trip-crossing-attribution"
+          href="https://www.openstreetmap.org/copyright"
+          target="_blank"
+          rel="noreferrer"
+        >
+          © OpenStreetMap
+        </a>
+      </div>
+    </section>
   );
 }
 
@@ -1237,6 +1451,7 @@ function JournalFeed({ site }: { site: SiteMode }) {
   const [openAlbumId, setOpenAlbumId] = useState<string | null>(null);
   const [selectedTripId, setSelectedTripId] = useState<string | null>(null);
   const [tripFeedPrefs, setTripFeedPrefs] = useState<Record<string, TripFeedPrefs>>({});
+  const [collectionFeedViews, setCollectionFeedViews] = useState<Record<string, FeedViewMode>>({});
   const [feedViewMenuOpen, setFeedViewMenuOpen] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -1274,21 +1489,19 @@ function JournalFeed({ site }: { site: SiteMode }) {
       return;
     }
     const featuredAlbum = catalog.albums.find((album) => album.featured && album.trips.length > 0);
-    const tripIds = new Set(allTrips.map((trip) => trip.id));
     if (featuredAlbum) {
       setOpenAlbumId(featuredAlbum.id);
-      setSelectedTripId((current) => {
-        if (current && tripIds.has(current)) return current;
-        return featuredAlbum.trips[0]?.id ?? null;
-      });
+      setSelectedTripId(null);
       return;
     }
     setOpenAlbumId(null);
-    setSelectedTripId((current) => {
-      if (current && tripIds.has(current)) return current;
-      return catalog.trips[0]?.id ?? catalog.albums[0]?.trips[0]?.id ?? null;
-    });
-  }, [allTrips, catalog.albums, catalog.trips, tripBrowse]);
+    setSelectedTripId(null);
+  }, [catalog.albums, tripBrowse]);
+
+  const activeAlbum = useMemo(
+    () => (openAlbumId ? catalog.albums.find((album) => album.id === openAlbumId) : undefined),
+    [catalog.albums, openAlbumId],
+  );
 
   const activeTrip = useMemo(
     () => (selectedTripId ? allTrips.find((trip) => trip.id === selectedTripId) : undefined),
@@ -1300,13 +1513,30 @@ function JournalFeed({ site }: { site: SiteMode }) {
     return tripFeedPrefs[selectedTripId] ?? defaultTripFeedPrefs();
   }, [selectedTripId, tripFeedPrefs]);
 
-  const feedView = activeTripPrefs.view;
+  const tripFeedView = activeTripPrefs.view;
   const chapterId = activeTripPrefs.chapterId;
+  const collectionFeedView = activeAlbum ? (collectionFeedViews[activeAlbum.id] ?? "timeline") : "timeline";
 
   const tripPosts = useMemo(() => {
     if (!selectedTripId) return [];
     return postsForTrip(posts, selectedTripId);
   }, [posts, selectedTripId]);
+
+  const collectionPosts = useMemo(() => {
+    if (!activeAlbum) return [];
+    const tripIds = new Set(activeAlbum.trips.map((trip) => trip.id));
+    return posts.filter((post) => {
+      const tripId = postTripId(post);
+      return tripId ? tripIds.has(tripId) : false;
+    });
+  }, [activeAlbum, posts]);
+
+  const collectionTripGroups = useMemo(() => {
+    if (!activeAlbum) return [];
+    return activeAlbum.trips
+      .map((trip) => ({ trip, posts: postsForTrip(posts, trip.id) }))
+      .filter((group) => group.posts.length > 0);
+  }, [activeAlbum, posts]);
 
   const patchTripPrefs = (tripId: string, patch: Partial<TripFeedPrefs>) => {
     setTripFeedPrefs((prev) => ({
@@ -1322,47 +1552,56 @@ function JournalFeed({ site }: { site: SiteMode }) {
 
   const feedRule = useMemo(() => {
     if (!tripBrowse) return site.preview ? "Preview feed" : "Latest places";
-    if (!activeTrip) return site.preview ? "Preview feed" : "Latest places";
-    if (feedView === "timeline") return activeTrip.title;
-    return activeTrip.title;
-  }, [activeTrip, feedView, site.preview, tripBrowse]);
+    if (activeTrip) return activeTrip.title;
+    if (activeAlbum) return activeAlbum.title;
+    return site.preview ? "Preview feed" : "Latest places";
+  }, [activeAlbum, activeTrip, site.preview, tripBrowse]);
 
   const feedRuleDetail = useMemo(() => {
-    if (!tripBrowse || !activeTrip) return null;
-    if (feedView === "timeline") return "Timeline · newest first";
-    if (chapterId === ALL_CHAPTERS) return "Timeline · newest first";
-    const chapter = activeTrip.chapters.find((item) => item.id === chapterId);
-    return chapter?.title ?? "One journey";
-  }, [activeTrip, chapterId, feedView, tripBrowse]);
+    if (!tripBrowse) return null;
+    if (activeTrip) {
+      if (tripFeedView === "timeline") return "Timeline · newest first";
+      if (chapterId === ALL_CHAPTERS) return "By chapter · all entries";
+      const chapter = activeTrip.chapters.find((item) => item.id === chapterId);
+      return chapter?.title ?? "By chapter";
+    }
+    if (activeAlbum) return collectionFeedView === "timeline" ? "Timeline · newest first" : "By trip";
+    return "Timeline · newest first";
+  }, [activeAlbum, activeTrip, chapterId, collectionFeedView, tripBrowse, tripFeedView]);
 
   useEffect(() => {
     setFeedViewMenuOpen(false);
-  }, [selectedTripId]);
+  }, [openAlbumId, selectedTripId]);
 
   const onTripSelect = (tripId: string) => {
     setSelectedTripId(tripId);
   };
 
   const onOpenAlbum = (albumId: string) => {
-    const album = catalog.albums.find((item) => item.id === albumId);
     setOpenAlbumId(albumId);
-    if (album?.trips[0]) setSelectedTripId(album.trips[0].id);
+    setSelectedTripId(null);
   };
 
   const onCloseAlbum = () => {
     setOpenAlbumId(null);
-    setSelectedTripId((current) => {
-      if (current && catalog.trips.some((trip) => trip.id === current)) return current;
-      return catalog.trips[0]?.id ?? catalog.albums[0]?.trips[0]?.id ?? null;
-    });
+    setSelectedTripId(null);
+  };
+
+  const onSelectTimeline = () => {
+    setSelectedTripId(null);
   };
 
   const onFeedViewChange = (view: FeedViewMode) => {
-    if (!selectedTripId) return;
-    patchTripPrefs(selectedTripId, {
-      view,
-      chapterId: view === "grouped" ? ALL_CHAPTERS : activeTripPrefs.chapterId,
-    });
+    if (selectedTripId) {
+      patchTripPrefs(selectedTripId, {
+        view,
+        chapterId: view === "grouped" ? ALL_CHAPTERS : activeTripPrefs.chapterId,
+      });
+      return;
+    }
+    if (activeAlbum) {
+      setCollectionFeedViews((current) => ({ ...current, [activeAlbum.id]: view }));
+    }
   };
 
   const onChapterChange = (nextChapterId: string) => {
@@ -1374,16 +1613,20 @@ function JournalFeed({ site }: { site: SiteMode }) {
 
   // oxlint-disable-next-line react/set-state-in-effect
   useEffect(() => {
-    if (!selectedTripId || canGroupByChapter || feedView !== "grouped") return;
+    if (!selectedTripId || canGroupByChapter || tripFeedView !== "grouped") return;
     patchTripPrefs(selectedTripId, { view: "timeline" });
-  }, [canGroupByChapter, feedView, selectedTripId]);
+  }, [canGroupByChapter, selectedTripId, tripFeedView]);
 
   if (loading) return <Loading />;
   if (error || !profile) return <ErrorState message={error} retry={load} />;
 
   const showTripFeed = tripBrowse && Boolean(activeTrip);
-  const timelineFeed = showTripFeed ? tripPosts : posts;
-  const showGroupedFeed = showTripFeed && canGroupByChapter && feedView === "grouped";
+  const showCollectionFeed = tripBrowse && Boolean(activeAlbum) && !activeTrip;
+  const timelineFeed = showTripFeed ? tripPosts : showCollectionFeed ? collectionPosts : posts;
+  const showGroupedTripFeed = showTripFeed && canGroupByChapter && tripFeedView === "grouped";
+  const showGroupedCollectionFeed = showCollectionFeed && collectionFeedView === "grouped";
+  const canGroupCollection = Boolean(activeAlbum && activeAlbum.trips.length > 1);
+  const activeFeedView = showTripFeed ? tripFeedView : collectionFeedView;
 
   return (
     <>
@@ -1406,7 +1649,7 @@ function JournalFeed({ site }: { site: SiteMode }) {
             </p>
           ) : null}
           {profile.bio ? <ProfileBio bio={profile.bio} /> : null}
-          {tripBrowse && selectedTripId && activeTrip ? (
+          {tripBrowse ? (
             <div className="trip-feed-controls">
               <StoryCatalogSelector
                 catalog={catalog}
@@ -1428,13 +1671,29 @@ function JournalFeed({ site }: { site: SiteMode }) {
       </header>
       <main className="page-shell feed-page">
       <div className="feed-rule">
-        <span>{feedRule}</span>
-        {showTripFeed && canGroupByChapter && feedRuleDetail ? (
+        <div className="feed-rule-scope">
+          {showTripFeed ? (
+            <button
+              type="button"
+              className="feed-rule-clear"
+              aria-label={activeAlbum ? `Show all trips in ${activeAlbum.title}` : "Show full timeline"}
+              title={activeAlbum ? "Show all trips" : "Show full timeline"}
+              onClick={onSelectTimeline}
+            >
+              <span className="feed-rule-clear-mark" aria-hidden>
+                <Icon name="arrow" size={11} />
+              </span>
+            </button>
+          ) : null}
+          <span>{feedRule}</span>
+        </div>
+        {((showTripFeed && canGroupByChapter) || (showCollectionFeed && canGroupCollection)) && feedRuleDetail ? (
           <FeedViewRuleMenu
             open={feedViewMenuOpen}
             onOpenChange={setFeedViewMenuOpen}
-            view={feedView}
+            view={activeFeedView}
             detailLabel={feedRuleDetail}
+            scope={showCollectionFeed ? "collection" : "trip"}
             onViewChange={onFeedViewChange}
           />
         ) : feedRuleDetail ? (
@@ -1443,16 +1702,34 @@ function JournalFeed({ site }: { site: SiteMode }) {
           <Icon name="grid" size={16} />
         )}
       </div>
-      {showGroupedFeed && activeTrip && activeTrip.chapters.length > 0 ? (
+      {showGroupedTripFeed && activeTrip && activeTrip.chapters.length > 0 ? (
         <FeedChapterBar
           chapterId={chapterId}
           chapters={activeTrip.chapters}
           onChapterChange={onChapterChange}
         />
       ) : null}
+      {showTripFeed && activeTrip ? <TripCrossingMap trip={activeTrip} /> : null}
       {posts.length === 0 ? (
         <div className="state-card"><p className="eyebrow">The road starts here</p><h2>No journals yet.</h2><p>{site.preview ? "Save a journal from admin to see it here before publishing." : "Visit the private admin page to publish your first journal."}</p></div>
-      ) : showGroupedFeed ? (
+      ) : showGroupedCollectionFeed ? (
+        <section className="feed-list feed-list-grouped">
+          {collectionTripGroups.map(({ trip, posts: groupPosts }) => (
+            <section className="feed-chapter-block" aria-labelledby={`trip-group-${trip.id}`} key={trip.id}>
+              <header className="feed-chapter-heading">
+                <h2 id={`trip-group-${trip.id}`}>{trip.title}</h2>
+                <p>{groupPosts.length} {groupPosts.length === 1 ? "entry" : "entries"}</p>
+              </header>
+              <TripCrossingMap trip={trip} />
+              <div className="feed-list feed-list-nested">
+                {groupPosts.map((post) => (
+                  <PostCard post={post} profile={profile} site={site} showJourneyGrouping={false} key={post.id} />
+                ))}
+              </div>
+            </section>
+          ))}
+        </section>
+      ) : showGroupedTripFeed ? (
         <section className="feed-list">
           {groupedFeedPosts.map((post) => (
             <PostCard post={post} profile={profile} site={site} showJourneyGrouping={false} key={post.id} />
@@ -1528,7 +1805,7 @@ function JourneyDetail({ site }: { site: SiteMode }) {
           <p className="eyebrow">{formatDate(post.takenAt)}</p>
           {grouping && <p className="journey-grouping detail-grouping">{grouping}</p>}
           <h1>{post.location?.name || "A place worth remembering"}</h1>
-          <p className="detail-caption">{post.caption}</p>
+          <PostStory post={post} className="detail-caption rich-story" />
           <div className="author-line"><Avatar profile={profile} /><span>Photographed by <strong>{profile.displayName}</strong></span></div>
           <TravelMap post={post} />
         </div>
@@ -1629,6 +1906,13 @@ function JourneyOrganizationFields({
   const [addingChapter, setAddingChapter] = useState(false);
   const [addingAlbum, setAddingAlbum] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [fromPlace, setFromPlace] = useState("");
+  const [fromLat, setFromLat] = useState("");
+  const [fromLng, setFromLng] = useState("");
+  const [arrivedPlace, setArrivedPlace] = useState("");
+  const [arrivedLat, setArrivedLat] = useState("");
+  const [arrivedLng, setArrivedLng] = useState("");
+  const [crossingSaved, setCrossingSaved] = useState(false);
 
   const reloadTrips = async () => {
     const data = await api<{ trips: AdminTrip[] }>("/api/admin/trips");
@@ -1667,6 +1951,24 @@ function JourneyOrganizationFields({
     return trips.find((trip) => trip.id === tripId)?.chapters ?? [];
   }, [tripId, trips]);
 
+  const selectedTrip = useMemo(
+    () => trips.find((trip) => trip.id === tripId),
+    [tripId, trips],
+  );
+
+  // The crossing form is reset when the selected trip changes or is reloaded.
+  // oxlint-disable-next-line react/set-state-in-effect
+  useEffect(() => {
+    const crossing = selectedTrip?.crossing;
+    // oxlint-disable-next-line react/set-state-in-effect
+    setFromPlace(crossing?.from.name ?? "");
+    setFromLat(crossing ? String(crossing.from.lat) : "");
+    setFromLng(crossing ? String(crossing.from.lng) : "");
+    setArrivedPlace(crossing?.arrived.name ?? "");
+    setArrivedLat(crossing ? String(crossing.arrived.lat) : "");
+    setArrivedLng(crossing ? String(crossing.arrived.lng) : "");
+  }, [selectedTrip]);
+
   const persistTripAlbum = async (nextTripId: string, nextAlbumId: string) => {
     await api(`/api/admin/trips/${nextTripId}`, {
       method: "PATCH",
@@ -1674,6 +1976,33 @@ function JourneyOrganizationFields({
       body: JSON.stringify({ albumId: nextAlbumId || null }),
     });
     await reloadTrips();
+  };
+
+  const saveTripCrossing = async (clear = false) => {
+    if (!tripId) return;
+    setBusy(true);
+    setOrgError("");
+    setCrossingSaved(false);
+    try {
+      await api(`/api/admin/trips/${tripId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fromPlaceName: clear ? null : fromPlace,
+          fromLat: clear ? null : fromLat || null,
+          fromLng: clear ? null : fromLng || null,
+          arrivedPlaceName: clear ? null : arrivedPlace,
+          arrivedLat: clear ? null : arrivedLat || null,
+          arrivedLng: clear ? null : arrivedLng || null,
+        }),
+      });
+      await reloadTrips();
+      setCrossingSaved(true);
+    } catch (err) {
+      setOrgError(err instanceof Error ? err.message : "Could not save crossing");
+    } finally {
+      setBusy(false);
+    }
   };
 
   const createAlbum = async () => {
@@ -1762,6 +2091,7 @@ function JourneyOrganizationFields({
               onChange={(e) => {
                 onTripIdChange(e.target.value);
                 onChapterIdChange("");
+                setCrossingSaved(false);
               }}
             >
               <option value="">None</option>
@@ -1793,6 +2123,79 @@ function JourneyOrganizationFields({
             </select>
           </label>
           <p className="form-hint">Collections group trips in the journal selector. Each trip can belong to one collection.</p>
+          {tripId ? (
+            <div className="trip-crossing-editor">
+              <div>
+                <p className="eyebrow">Trip crossing</p>
+                <p className="form-hint">Shown once above this trip’s journals, not as a separate post.</p>
+              </div>
+              <label>
+                From
+                <PlaceInput
+                  value={fromPlace}
+                  onChange={(value) => {
+                    setFromPlace(value);
+                    setFromLat("");
+                    setFromLng("");
+                    setCrossingSaved(false);
+                  }}
+                  onPick={(place) => {
+                    setFromPlace(place.name);
+                    setFromLat(String(place.lat));
+                    setFromLng(String(place.lng));
+                  }}
+                  placeholder="Vancouver, Canada"
+                />
+              </label>
+              <label>
+                Arrived
+                <PlaceInput
+                  value={arrivedPlace}
+                  onChange={(value) => {
+                    setArrivedPlace(value);
+                    setArrivedLat("");
+                    setArrivedLng("");
+                    setCrossingSaved(false);
+                  }}
+                  onPick={(place) => {
+                    setArrivedPlace(place.name);
+                    setArrivedLat(String(place.lat));
+                    setArrivedLng(String(place.lng));
+                  }}
+                  placeholder="Auckland, New Zealand"
+                />
+              </label>
+              {selectedTrip?.crossing ? (
+                <div className="trip-crossing-admin-preview">
+                  <TripCrossingMap
+                    trip={{
+                      id: selectedTrip.id,
+                      slug: selectedTrip.slug,
+                      title: selectedTrip.title,
+                      crossing: selectedTrip.crossing,
+                      chapters: [],
+                    }}
+                  />
+                </div>
+              ) : null}
+              <div className="trip-crossing-editor-actions">
+                <button type="button" className="primary-button" disabled={busy} onClick={() => void saveTripCrossing()}>
+                  {busy ? "Saving…" : "Save crossing"}
+                </button>
+                {(fromPlace || arrivedPlace) ? (
+                  <button
+                    type="button"
+                    className="organization-text-button"
+                    disabled={busy}
+                    onClick={() => void saveTripCrossing(true)}
+                  >
+                    Remove crossing
+                  </button>
+                ) : null}
+              </div>
+              {crossingSaved ? <p className="success">Crossing saved.</p> : null}
+            </div>
+          ) : null}
           {!addingAlbum ? (
             <button type="button" className="organization-text-button" onClick={() => setAddingAlbum(true)}>
               + New collection
@@ -2172,7 +2575,7 @@ function AdminDashboard() {
                     {[post.tripTitle, post.chapterTitle].filter(Boolean).join(" · ")}
                   </span>
                 )}
-                <p>{post.caption}</p>
+                <p>{storyHtmlToPlainText(post.caption) || post.caption}</p>
               </div>
               <div className="admin-actions">
                 <Link to={`/admin/posts/${post.slug}/edit`}>Edit</Link>
@@ -2196,7 +2599,7 @@ function NewPost() {
   const navigate = useNavigate();
   const inputRef = useRef<HTMLInputElement>(null);
   const [files, setFiles] = useState<File[]>([]);
-  const [caption, setCaption] = useState("");
+  const [contentHtml, setContentHtml] = useState("");
   const [place, setPlace] = useState("");
   const [takenAt, setTakenAt] = useState("");
   const [publishedAt, setPublishedAt] = useState(datetimeLocalNow);
@@ -2263,7 +2666,9 @@ function NewPost() {
     setBusy(true); setError("");
     const data = new FormData();
     files.forEach((file) => data.append("images", file));
-    data.append("caption", caption);
+    data.append("contentHtml", contentHtml);
+    // Older APIs only persist `caption`; store HTML there so formatting survives.
+    data.append("caption", contentHtml || "");
     data.append("placeName", place);
     if (takenAt) data.append("takenAt", new Date(takenAt).toISOString());
     data.append("publishedAt", new Date(publishedAt).toISOString());
@@ -2328,10 +2733,30 @@ function NewPost() {
             onChapterIdChange={setChapterId}
             onAlbumIdChange={setAlbumId}
           />
-          <label>Place<input value={place} onChange={(e) => setPlace(e.target.value)} placeholder="Kyoto, Japan" /></label>
+          <label>
+            Place
+            <PlaceInput
+              value={place}
+              onChange={setPlace}
+              onPick={(picked) => {
+                setPlace(picked.name);
+                setLat(String(picked.lat));
+                setLng(String(picked.lng));
+              }}
+              placeholder="Kyoto, Japan"
+            />
+          </label>
           <label>Date taken <span className="optional">Optional</span><input type="datetime-local" value={takenAt} onChange={(e) => setTakenAt(e.target.value)} /></label>
           <label>Date posted<input type="datetime-local" value={publishedAt} onChange={(e) => setPublishedAt(e.target.value)} /></label>
-          <label>Story<textarea value={caption} onChange={(e) => setCaption(e.target.value)} placeholder="What made this moment worth keeping?" rows={6} /></label>
+          <div className="story-field">
+            <span className="story-field-label">Story</span>
+            <RichTextEditor
+              value={contentHtml}
+              onChange={setContentHtml}
+              placeholder="What made this moment worth keeping?"
+              disabled={busy}
+            />
+          </div>
           <div className="coordinates"><label>Latitude<input inputMode="decimal" value={lat} onChange={(e) => setLat(e.target.value)} placeholder="35.0116" /></label><label>Longitude<input inputMode="decimal" value={lng} onChange={(e) => setLng(e.target.value)} placeholder="135.7681" /></label></div>
           <button className="primary-button location-detect-button" type="button" disabled={locating} onClick={useMyLocation}>
             {locating ? "Detecting…" : "Use my location"}
@@ -2350,6 +2775,12 @@ function NewPost() {
 function ProfileEditor() {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [avatarPreview, setAvatarPreview] = useState("");
+  const [avatarFocus, setAvatarFocus] = useState<FocusPoint>({ x: 0.5, y: 0.5 });
+  const avatarPreviewRef = useRef("");
+  const avatarDragRef = useRef<{ startX: number; startY: number; x: number; y: number; size: number } | null>(null);
   const [place, setPlace] = useState("");
   const [lat, setLat] = useState("");
   const [lng, setLng] = useState("");
@@ -2358,12 +2789,26 @@ function ProfileEditor() {
   useEffect(() => {
     api<Profile>("/api/profile").then((data) => {
       setProfile(data);
+      setAvatarFocus({ x: data.avatarFocusX ?? 0.5, y: data.avatarFocusY ?? 0.5 });
       setPlace(data.currentLocation?.name ?? "");
       setLat(data.currentLocation?.lat != null ? String(data.currentLocation.lat) : "");
       setLng(data.currentLocation?.lng != null ? String(data.currentLocation.lng) : "");
     });
   }, []);
+  useEffect(() => () => {
+    if (avatarPreviewRef.current) URL.revokeObjectURL(avatarPreviewRef.current);
+  }, []);
   if (!profile) return <Loading />;
+
+  const previewAvatar = (file?: File) => {
+    if (avatarPreviewRef.current) URL.revokeObjectURL(avatarPreviewRef.current);
+    const previewUrl = file ? URL.createObjectURL(file) : "";
+    avatarPreviewRef.current = previewUrl;
+    setAvatarPreview(previewUrl);
+    if (file) setAvatarFocus({ x: 0.5, y: 0.5 });
+    setSaved(false);
+    setError("");
+  };
 
   const useMyLocation = () => {
     setLocating(true);
@@ -2380,25 +2825,94 @@ function ProfileEditor() {
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    setSaving(true);
+    setSaved(false);
+    setError("");
     const data = new FormData(event.currentTarget);
     data.set("currentPlaceName", place);
     data.set("currentLat", lat);
     data.set("currentLng", lng);
-    await api("/api/profile", { method: "PATCH", body: data });
-    setSaved(true);
+    data.set("avatarFocusX", String(avatarFocus.x));
+    data.set("avatarFocusY", String(avatarFocus.y));
+    try {
+      const updated = await api<Profile>("/api/profile", { method: "PATCH", body: data });
+      setProfile(updated);
+      setAvatarFocus({ x: updated.avatarFocusX ?? 0.5, y: updated.avatarFocusY ?? 0.5 });
+      if (avatarPreviewRef.current) URL.revokeObjectURL(avatarPreviewRef.current);
+      avatarPreviewRef.current = "";
+      setAvatarPreview("");
+      setSaved(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save profile");
+    } finally {
+      setSaving(false);
+    }
   };
   return (
     <main className="admin-main editor-page">
       <header className="admin-title"><div><p className="eyebrow">Public identity</p><h1>Profile</h1></div></header>
       <form className="profile-form" onSubmit={submit}>
-        <div className="profile-avatar-edit"><Avatar profile={profile} large /><label>Portrait<input name="avatar" type="file" accept="image/*" /></label></div>
+        <div className="profile-avatar-edit">
+          <div
+            className={`profile-avatar-framer${avatarPreview || profile.avatarUrl ? " profile-avatar-framer-active" : ""}`}
+            aria-label="Profile picture crop preview"
+            onPointerDown={(event) => {
+              if (!avatarPreview && !profile.avatarUrl) return;
+              event.currentTarget.setPointerCapture(event.pointerId);
+              avatarDragRef.current = {
+                startX: event.clientX,
+                startY: event.clientY,
+                x: avatarFocus.x,
+                y: avatarFocus.y,
+                size: event.currentTarget.clientWidth,
+              };
+            }}
+            onPointerMove={(event) => {
+              const drag = avatarDragRef.current;
+              if (!drag) return;
+              setAvatarFocus({
+                x: clamp01(drag.x - (event.clientX - drag.startX) / drag.size),
+                y: clamp01(drag.y - (event.clientY - drag.startY) / drag.size),
+              });
+            }}
+            onPointerUp={() => { avatarDragRef.current = null; }}
+            onPointerCancel={() => { avatarDragRef.current = null; }}
+          >
+            <Avatar
+              profile={{
+                ...profile,
+                avatarUrl: avatarPreview || profile.avatarUrl,
+                avatarFocusX: avatarFocus.x,
+                avatarFocusY: avatarFocus.y,
+              }}
+              large
+            />
+          </div>
+          <label>
+            Portrait
+            <input name="avatar" type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => previewAvatar(event.target.files?.[0])} />
+            {(avatarPreview || profile.avatarUrl) && <span className="form-hint">Drag the picture inside the circle to reframe it.</span>}
+          </label>
+        </div>
         <label>Display name<input name="displayName" defaultValue={profile.displayName} /></label>
         <label>Handle<input name="username" defaultValue={profile.username} /></label>
         <label>Catch phrase<input name="tagline" defaultValue={profile.tagline} /></label>
         <label>Bio<textarea name="bio" rows={5} defaultValue={profile.bio} /></label>
         <div className="profile-location-edit">
           <p className="eyebrow">Current location</p>
-          <label>Place<input value={place} onChange={(e) => setPlace(e.target.value)} placeholder="Lisbon, Portugal" /></label>
+          <label>
+            Place
+            <PlaceInput
+              value={place}
+              onChange={setPlace}
+              onPick={(picked) => {
+                setPlace(picked.name);
+                setLat(String(picked.lat));
+                setLng(String(picked.lng));
+              }}
+              placeholder="Lisbon, Portugal"
+            />
+          </label>
           <div className="coordinates">
             <label>Latitude<input inputMode="decimal" value={lat} onChange={(e) => setLat(e.target.value)} placeholder="38.7223" /></label>
             <label>Longitude<input inputMode="decimal" value={lng} onChange={(e) => setLng(e.target.value)} placeholder="-9.1393" /></label>
@@ -2410,7 +2924,8 @@ function ProfileEditor() {
           {locError && <p className="form-error">{locError}</p>}
         </div>
         {saved && <p className="success">Profile saved.</p>}
-        <button className="primary-button" type="submit">Save profile</button>
+        {error && <p className="form-error">{error}</p>}
+        <button className="primary-button" disabled={saving} type="submit">{saving ? "Saving…" : "Save profile"}</button>
       </form>
     </main>
   );
@@ -2425,7 +2940,7 @@ function EditPost() {
   const [lng, setLng] = useState("");
   const [takenAt, setTakenAt] = useState("");
   const [publishedAt, setPublishedAt] = useState(datetimeLocalNow);
-  const [caption, setCaption] = useState("");
+  const [contentHtml, setContentHtml] = useState("");
   const [error, setError] = useState("");
   const [locating, setLocating] = useState(false);
   const [locError, setLocError] = useState("");
@@ -2442,7 +2957,7 @@ function EditPost() {
       .then(async (loaded) => {
         if (cancelled) return;
         setPost(loaded);
-        setCaption(loaded.caption);
+        setContentHtml(storyToEditorHtml(loaded));
         setChapterId(loaded.chapter?.id ?? "");
         setTripId(loaded.trip?.id ?? loaded.chapter?.trip.id ?? "");
         setTakenAt(new Date(loaded.takenAt).toISOString().slice(0, 16));
@@ -2507,7 +3022,9 @@ function EditPost() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           placeName: place,
-          caption,
+          contentHtml,
+          // Older APIs only persist `caption`; store HTML there so formatting survives.
+          caption: contentHtml || "",
           takenAt: new Date(takenAt).toISOString(),
           publishedAt: new Date(publishedAt).toISOString(),
           lat: lat ? Number(lat) : null,
@@ -2704,10 +3221,25 @@ function EditPost() {
             onChapterIdChange={setChapterId}
             onAlbumIdChange={setAlbumId}
           />
-          <label>Place<input value={place} onChange={(e) => setPlace(e.target.value)} placeholder="Kyoto, Japan" /></label>
+          <label>
+            Place
+            <PlaceInput
+              value={place}
+              onChange={setPlace}
+              onPick={(picked) => {
+                setPlace(picked.name);
+                setLat(String(picked.lat));
+                setLng(String(picked.lng));
+              }}
+              placeholder="Kyoto, Japan"
+            />
+          </label>
           <label>Date taken<input type="datetime-local" value={takenAt} onChange={(e) => setTakenAt(e.target.value)} /></label>
           <label>Date posted<input type="datetime-local" value={publishedAt} onChange={(e) => setPublishedAt(e.target.value)} /></label>
-          <label>Story<textarea value={caption} onChange={(e) => setCaption(e.target.value)} rows={7} /></label>
+          <div className="story-field">
+            <span className="story-field-label">Story</span>
+            <RichTextEditor value={contentHtml} onChange={setContentHtml} disabled={busy} />
+          </div>
           <div className="coordinates">
             <label>Latitude<input inputMode="decimal" value={lat} onChange={(e) => setLat(e.target.value)} placeholder="35.0116" /></label>
             <label>Longitude<input inputMode="decimal" value={lng} onChange={(e) => setLng(e.target.value)} placeholder="135.7681" /></label>

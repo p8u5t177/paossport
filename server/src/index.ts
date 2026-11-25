@@ -30,6 +30,7 @@ import {
 } from "./media.js";
 import { reverseGeocodeLabel, searchPlaces } from "./geocode.js";
 import { mapProfileLocation, type ProfileRow } from "./profile-map.js";
+import { normalizeStoryContent, normalizeStoryInput, sanitizeContentHtml } from "./rich-text.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT ?? 3847);
@@ -175,6 +176,7 @@ function mapPost(
     id: string;
     slug: string;
     caption: string;
+    content_html?: string | null;
     taken_at: string;
     published_at: string;
     is_draft?: number;
@@ -208,6 +210,7 @@ function mapPost(
     id: post.id,
     slug: post.slug,
     caption: post.caption,
+    contentHtml: sanitizeContentHtml(post.content_html ?? ""),
     takenAt: post.taken_at,
     publishedAt: post.published_at,
     isDraft: Boolean(post.is_draft),
@@ -251,6 +254,8 @@ app.get("/api/profile", (_req, res) => {
     tagline: profile.tagline,
     bio: profile.bio,
     avatarUrl: profile.avatar_url ?? undefined,
+    avatarFocusX: profile.avatar_focus_x,
+    avatarFocusY: profile.avatar_focus_y,
     currentLocation: mapProfileLocation(profile),
     links,
   });
@@ -820,7 +825,13 @@ app.post("/api/posts", admin, upload.array("images", 10), async (req, res) => {
       res.status(400).json({ error: "At least one image required" });
       return;
     }
-    const caption = String(req.body.caption ?? "");
+    const rawContentHtml =
+      req.body.contentHtml != null ? String(req.body.contentHtml).trim() : "";
+    const story = rawContentHtml
+      ? normalizeStoryContent(rawContentHtml)
+      : normalizeStoryInput(String(req.body.caption ?? ""));
+    const caption = story.caption;
+    const contentHtml = story.contentHtml;
     const placeName = req.body.placeName ? String(req.body.placeName) : null;
     const requestedTakenAt = req.body.takenAt ? String(req.body.takenAt) : undefined;
     const requestedPublishedAt = req.body.publishedAt ? String(req.body.publishedAt) : undefined;
@@ -853,12 +864,13 @@ app.post("/api/posts", admin, upload.array("images", 10), async (req, res) => {
     }
 
     db.prepare(
-      `INSERT INTO post (id, slug, caption, taken_at, place_name, lat, lng, trip_id, chapter_id, is_draft, published_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+      `INSERT INTO post (id, slug, caption, content_html, taken_at, place_name, lat, lng, trip_id, chapter_id, is_draft, published_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
     ).run(
       postId,
       slug,
       caption,
+      contentHtml,
       metaTaken,
       placeName,
       metaLat,
@@ -1043,6 +1055,7 @@ app.patch("/api/posts/:id", admin, (req, res) => {
   }
   const body = req.body as {
     caption?: string;
+    contentHtml?: string;
     placeName?: string;
     takenAt?: string;
     publishedAt?: string;
@@ -1051,14 +1064,39 @@ app.patch("/api/posts/:id", admin, (req, res) => {
     chapterId?: string | null;
     tripId?: string | null;
   };
-  const caption = body.caption ?? existing.caption;
+  const existingRow = existing as {
+    chapter_id?: string | null;
+    trip_id?: string | null;
+    content_html?: string | null;
+  };
+  let caption = existing.caption;
+  let contentHtml = existingRow.content_html ?? "";
+  if (body.contentHtml !== undefined) {
+    const raw = String(body.contentHtml).trim();
+    if (raw) {
+      const story = normalizeStoryContent(raw);
+      caption = story.caption;
+      contentHtml = story.contentHtml;
+    } else if (body.caption !== undefined && String(body.caption).trim()) {
+      // Older clients / proxied APIs may only populate caption.
+      const story = normalizeStoryInput(String(body.caption));
+      caption = story.caption;
+      contentHtml = story.contentHtml;
+    } else {
+      caption = "";
+      contentHtml = "";
+    }
+  } else if (body.caption !== undefined) {
+    const story = normalizeStoryInput(String(body.caption));
+    caption = story.caption;
+    contentHtml = story.contentHtml;
+  }
   const placeName = body.placeName ?? existing.place_name;
   const takenAt = body.takenAt ?? existing.taken_at;
   const publishedAt = body.publishedAt ?? existing.published_at;
   const lat = body.lat === undefined ? existing.lat : body.lat;
   const lng = body.lng === undefined ? existing.lng : body.lng;
 
-  const existingRow = existing as { chapter_id?: string | null; trip_id?: string | null };
   const tripRaw = body.tripId !== undefined ? body.tripId : existingRow.trip_id;
   const chapterRaw = body.chapterId !== undefined ? body.chapterId : existingRow.chapter_id;
   const organization = resolvePostOrganization(tripRaw, chapterRaw);
@@ -1069,10 +1107,11 @@ app.patch("/api/posts/:id", admin, (req, res) => {
 
   db.prepare(
     `UPDATE post
-     SET caption = ?, place_name = ?, taken_at = ?, published_at = ?, lat = ?, lng = ?, trip_id = ?, chapter_id = ?, updated_at = datetime('now')
+     SET caption = ?, content_html = ?, place_name = ?, taken_at = ?, published_at = ?, lat = ?, lng = ?, trip_id = ?, chapter_id = ?, updated_at = datetime('now')
      WHERE id = ?`,
   ).run(
     caption,
+    contentHtml,
     placeName,
     takenAt,
     publishedAt,
@@ -1151,20 +1190,44 @@ app.patch("/api/profile", admin, upload.single("avatar"), async (req, res) => {
       : cur.current_place_name;
   const currentLat = req.body.currentLat !== undefined ? coord(req.body.currentLat) : cur.current_lat;
   const currentLng = req.body.currentLng !== undefined ? coord(req.body.currentLng) : cur.current_lng;
+  const focus = (value: unknown, fallback: number) => {
+    if (value === undefined) return fallback;
+    const n = Number(value);
+    return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : fallback;
+  };
+  const avatarFocusX = focus(req.body.avatarFocusX, cur.avatar_focus_x);
+  const avatarFocusY = focus(req.body.avatarFocusY, cur.avatar_focus_y);
   db.prepare(
   `UPDATE profile SET display_name = ?, username = ?, tagline = ?, bio = ?, avatar_url = COALESCE(?, avatar_url),
-     current_place_name = ?, current_lat = ?, current_lng = ?, updated_at = datetime('now') WHERE id = 1`,
+     avatar_focus_x = ?, avatar_focus_y = ?, current_place_name = ?, current_lat = ?, current_lng = ?,
+     updated_at = datetime('now') WHERE id = 1`,
   ).run(
     displayName ?? cur.display_name,
     username ?? cur.username,
     tagline ?? cur.tagline,
     bio ?? cur.bio,
     avatarUrl ?? null,
+    avatarFocusX,
+    avatarFocusY,
     currentPlaceName,
     currentLat,
     currentLng,
   );
-  res.json({ ok: true });
+  const updated = db.prepare("SELECT * FROM profile WHERE id = 1").get() as ProfileRow;
+  const links = db
+    .prepare("SELECT label, href FROM profile_link WHERE profile_id = 1 ORDER BY sort_order")
+    .all() as { label: string; href: string }[];
+  res.json({
+    displayName: updated.display_name,
+    username: updated.username,
+    tagline: updated.tagline,
+    bio: updated.bio,
+    avatarUrl: updated.avatar_url ?? undefined,
+    avatarFocusX: updated.avatar_focus_x,
+    avatarFocusY: updated.avatar_focus_y,
+    currentLocation: mapProfileLocation(updated),
+    links,
+  });
 });
 
 const serveClient = process.env.NODE_ENV === "production" && fs.existsSync(clientDist);

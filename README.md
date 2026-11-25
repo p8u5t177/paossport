@@ -22,6 +22,16 @@ npm run dev
 
 Open the web app at `http://localhost:3848`. The API runs on `http://localhost:3847` and is proxied by Vite.
 
+### Local UI against test data
+
+To exercise the same SQLite-backed content as [test](https://test-paooffline.wanderlustportal.com) without copying the database:
+
+```bash
+npm run dev:test
+```
+
+Or set `DEV_API_ORIGIN=https://test-paooffline.wanderlustportal.com` in `.env` and run only the client (`npm run dev -w client`). Vite forwards `/api` and `/media` to that host. Admin login is checked against the **test** server’s `ADMIN_SECRET` — your local value must match Coolify’s, or you’ll get “Invalid secret”. Use `http://localhost:3848` for admin (not a LAN IP) so the session cookie is accepted. Restart Vite after changing `.env`.
+
 The admin studio is at `/admin`. Set `ADMIN_SECRET` before starting the app; without it, the public journal still works but admin login remains disabled.
 
 ## Production

@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
+import { normalizeStoryInput } from "./rich-text.js";
 
 const dataDir = path.resolve(process.env.DATA_DIR ?? path.join(process.cwd(), "..", "data"));
 const dbPath = process.env.DATABASE_PATH ?? path.join(dataDir, "app.db");
@@ -18,6 +19,8 @@ export function getDb() {
       tagline TEXT NOT NULL DEFAULT 'To Nowhere. And Everywhere',
       bio TEXT NOT NULL DEFAULT '',
       avatar_url TEXT,
+      avatar_focus_x REAL NOT NULL DEFAULT 0.5,
+      avatar_focus_y REAL NOT NULL DEFAULT 0.5,
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
@@ -33,6 +36,7 @@ export function getDb() {
       id TEXT PRIMARY KEY,
       slug TEXT NOT NULL UNIQUE,
       caption TEXT NOT NULL DEFAULT '',
+      content_html TEXT NOT NULL DEFAULT '',
       taken_at TEXT NOT NULL,
       published_at TEXT NOT NULL DEFAULT (datetime('now')),
       place_name TEXT,
@@ -120,6 +124,12 @@ export function getDb() {
   if (!profileColNames.has("current_lng")) {
     db.exec(`ALTER TABLE profile ADD COLUMN current_lng REAL`);
   }
+  if (!profileColNames.has("avatar_focus_x")) {
+    db.exec(`ALTER TABLE profile ADD COLUMN avatar_focus_x REAL NOT NULL DEFAULT 0.5`);
+  }
+  if (!profileColNames.has("avatar_focus_y")) {
+    db.exec(`ALTER TABLE profile ADD COLUMN avatar_focus_y REAL NOT NULL DEFAULT 0.5`);
+  }
 
   const postCols = db.prepare("PRAGMA table_info(post)").all() as { name: string }[];
   const postColNames = new Set(postCols.map((col) => col.name));
@@ -131,6 +141,17 @@ export function getDb() {
   }
   if (!postColNames.has("trip_id")) {
     db.exec(`ALTER TABLE post ADD COLUMN trip_id TEXT REFERENCES trip(id) ON DELETE SET NULL`);
+  }
+  if (!postColNames.has("content_html")) {
+    db.exec(`ALTER TABLE post ADD COLUMN content_html TEXT NOT NULL DEFAULT ''`);
+    const legacy = db
+      .prepare(`SELECT id, caption FROM post WHERE content_html = '' AND caption != ''`)
+      .all() as { id: string; caption: string }[];
+    const setStory = db.prepare(`UPDATE post SET content_html = ?, caption = ? WHERE id = ?`);
+    for (const row of legacy) {
+      const story = normalizeStoryInput(row.caption);
+      setStory.run(story.contentHtml, story.caption, row.id);
+    }
   }
 
   const tripCols = db.prepare("PRAGMA table_info(trip)").all() as { name: string }[];
@@ -185,6 +206,7 @@ export type PostRow = {
   id: string;
   slug: string;
   caption: string;
+  content_html: string;
   taken_at: string;
   published_at: string;
   is_draft: number;
